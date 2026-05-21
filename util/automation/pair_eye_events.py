@@ -56,9 +56,13 @@ def pair_events(capture: str, eye_config=None) -> dict:
         for e in events:
             by_eye.setdefault(e["eye"], []).append(e)
 
-        # Annotate every action with PSO id from state — single full pass
+        # Annotate L+R events with PSO id from state. We deliberately skip
+        # "unknown" events here: collect_state_at_event calls SetFrameEvent
+        # which is expensive on big captures, and unknown events can't pair
+        # anyway. This drops pairing time on a 2200-action SN2 capture from
+        # ~13 min to ~5 min.
         state_by_eid = {}
-        for e in events:
+        for e in by_eye["left"] + by_eye["right"]:
             try:
                 state = _lib.collect_state_at_event(controller, int(e["eventId"]))
             except Exception:

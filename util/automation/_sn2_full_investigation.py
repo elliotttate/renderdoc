@@ -62,6 +62,7 @@ try:
     from util.automation import (
         _lib,
         eye_classifier,
+        eye_classifier_temporal,
         pair_eye_events,
         stereo_divergence,
         compute_writers,
@@ -74,6 +75,20 @@ try:
 except Exception:
     log(traceback.format_exc())
     os._exit(3)
+
+
+# For SN2-style captures (single-eye-sized scene RT rendered twice),
+# monkey-patch the eye_classifier and pair_eye_events modules to use the
+# temporal classifier instead of the viewport-based one. This drops
+# the 13-min per-action SetFrameEvent walk and produces sane per-eye counts.
+def _temporal_classify(capture_path, config=None):
+    return eye_classifier_temporal.classify(capture_path)
+
+
+# Override the eye classification used by pair_eye_events and
+# stereo_divergence — both call eye_classifier.classify_capture().
+eye_classifier.classify_capture = _temporal_classify
+log("PATCHED eye_classifier.classify_capture -> temporal classifier")
 
 
 def write_json(name, payload):
