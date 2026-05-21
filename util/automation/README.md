@@ -75,20 +75,23 @@ python -m util.automation.explain_pixel   C:\captures\sn2.rdc --x 900 --y 250 --
   uevr.jsonl               (added by uevr_ingest) eye + override correlation per event
 ```
 
-Shader hash is SHA-1 of `ShaderReflection.rawBytes`. RenderDoc does not expose a
+Shader hash is MD5 of `ShaderReflection.rawBytes`. RenderDoc does not expose a
 stable per-shader hash directly, so this matches what Nsight/PIX automation
-typically uses.
+typically uses, and the C++ `renderdoccmd index-capture` subcommand emits the
+same hashes by sharing the `3rdparty/md5/` implementation.
 
 ## What's not yet implemented
 
-The modules above cover the Python-API-tractable parts of the roadmap.
-The following items need driver-internal changes and are tracked as
-follow-ups:
+The Python modules above cover everything in the roadmap that can be done on
+top of the public replay API and structured file. Remaining items:
 
-- Persistent descriptor *write history* over time (`CopyDescriptors`,
-  `CopyDescriptorsSimple`) — `state-at-event` today snapshots per event,
-  which is sufficient for most workflows but doesn't show how a slot's
-  contents evolved. Driver work: `renderdoc/driver/d3d12/d3d12_manager.cpp`.
-- "Nonblocking incompatibility" suppression at the layer/UI boundary
-  beyond what `ReplayOptions` already exposes.
-- The full set of qrenderdoc panels listed in §20.
+- The full set of qrenderdoc Qt panels listed in §20. See
+  `qrenderdoc/Windows/AutomationDock*` for the scaffolding shipped alongside
+  these scripts. The data is all available; the panels are thin views.
+- Profile-level modal suppression (§18) for qrenderdoc — `ReplayOptions`
+  covers replay-side suppression but the Qt UI still surfaces some modals.
+- Driver-side instrumentation work that *isn't* needed for analysis any more
+  but would still be useful for low-level inspection (e.g. per-CopyDescriptors
+  call-stacks). The combination of `descriptor_history.py` (consumed-state
+  timeline) + `d3d12_copy_descriptors.py` (raw chunk log) already gives full
+  coverage of every descriptor mutation that touches a draw.
