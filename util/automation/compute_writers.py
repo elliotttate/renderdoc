@@ -38,21 +38,33 @@ def _is_writer(usage_str: str) -> bool:
     # RenderDoc's ResourceUsage names compute/pixel UAV writes as `CS_RWResource`
     # / `PS_RWResource`, not "CS_UAV". The original "UAV" filter missed every
     # GPU compute UAV write in modern D3D12/Vulkan captures. Match all known
-    # writer usages by their actual RenderDoc names:
+    # PRODUCER usages by their actual RenderDoc names.
+    #
+    # Important: Discard/Barrier/Clear are deliberately EXCLUDED — they are
+    # resource-lifecycle markers, not producers. A previous bug counted
+    # `Discard` as a writer and caused the SN2 investigation to misidentify
+    # `DiscardResource` events as the source of texture content; the actual
+    # writers turned out to be the surrounding ColorTarget MRT draws.
+    # `Clear` is a real producer of zeroed data so it stays.
     return any(k in usage_str for k in (
         "RWResource",          # CS_RWResource / PS_RWResource — UAV writes
         "RWBuffer",            # storage-buffer writes
         "UAV",                 # legacy fallback
-        "ColourTarget",        # RTV
+        "ColourTarget",        # RTV — both UK/US spellings appear in different builds
+        "ColorTarget",
         "DepthStencilTarget",  # DSV
         "CopyDst",             # CopyBufferRegion / CopyTextureRegion destination
         "ResolveDst",          # MSAA resolve destination
         "Resolve",             # variant
         "GenMips",             # automatic mip generation
-        "Discard",             # explicit discard
         "Clear",               # ClearUnorderedAccessView / ClearRenderTargetView
         "StreamOut",           # transform feedback
     ))
+
+
+def _is_lifecycle(usage_str: str) -> bool:
+    """Return True for resource-lifecycle markers that are NOT real producers."""
+    return any(k in usage_str for k in ("Discard", "Barrier"))
 
 
 def _find_uav_slot_for_resource(controller, action, target_resource_id) -> Optional[Dict[str, Any]]:
