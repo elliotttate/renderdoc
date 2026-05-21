@@ -20,6 +20,10 @@ without depending on Nsight, generated C++ captures, or ad-hoc scripts.
 | `replay_probe` | §16 (M7) | Replay-time mutation probes (swap resource, magenta-PS, ROI sample) |
 | `launch_profile` | §1 (M1) | Deterministic launch profiles (exe, args, env, capture trigger) |
 | `explain_pixel` | §24 (acceptance) | End-to-end report for a problematic pixel |
+| `rdg_classifier` | §12 | Regex-based Unreal RDG pass classifier |
+| `automation_server` | §15 | Small HTTP/JSON-RPC service around the replay controller |
+| `nonblocking` | §2 | Compatibility / debug-message report (no modal blocking) |
+| `sn2_workflows` | §23 | Concrete SN2 debugging recipes (pso-events, override-fired, first-bad-input, t9-vs-t5, view-cbv-diff) |
 
 The same functionality is exposed by the C++ subcommands in `renderdoccmd`:
 `renderdoccmd index-capture`, `renderdoccmd state-at-event`, etc.

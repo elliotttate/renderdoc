@@ -1,0 +1,12 @@
+{
+  "name": "SN2 UEVR shader override test",
+  "exe": "E:/Github/Subnautica 2/Subnautica2/Binaries/Win64/Subnautica2-Win64-Shipping.exe",
+  "working_dir": "E:/Github/Subnautica 2/Subnautica2/Binaries/Win64",
+  "args": "-emulatestereo -ResX=1280 -ResY=720 -windowed",
+  "environment_mode": "uevr",
+  "uevr_profile": "Subnautica2-Win64-Shipping",
+  "capture_trigger": "hotkey",
+  "out_dir": "E:/Github/Subnautica 2/captures",
+  "output_name_prefix": "sn2_uevr",
+  "max_wait_seconds": 600
+}
