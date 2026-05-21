@@ -35,7 +35,24 @@ import renderdoc as rd  # noqa: E402
 
 
 def _is_writer(usage_str: str) -> bool:
-    return any(k in usage_str for k in ("UAV", "RTV", "DSV", "CopyDst", "Resolve", "Write"))
+    # RenderDoc's ResourceUsage names compute/pixel UAV writes as `CS_RWResource`
+    # / `PS_RWResource`, not "CS_UAV". The original "UAV" filter missed every
+    # GPU compute UAV write in modern D3D12/Vulkan captures. Match all known
+    # writer usages by their actual RenderDoc names:
+    return any(k in usage_str for k in (
+        "RWResource",          # CS_RWResource / PS_RWResource — UAV writes
+        "RWBuffer",            # storage-buffer writes
+        "UAV",                 # legacy fallback
+        "ColourTarget",        # RTV
+        "DepthStencilTarget",  # DSV
+        "CopyDst",             # CopyBufferRegion / CopyTextureRegion destination
+        "ResolveDst",          # MSAA resolve destination
+        "Resolve",             # variant
+        "GenMips",             # automatic mip generation
+        "Discard",             # explicit discard
+        "Clear",               # ClearUnorderedAccessView / ClearRenderTargetView
+        "StreamOut",           # transform feedback
+    ))
 
 
 def _find_uav_slot_for_resource(controller, action, target_resource_id) -> Optional[Dict[str, Any]]:
