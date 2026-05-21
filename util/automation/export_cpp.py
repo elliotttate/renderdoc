@@ -120,7 +120,13 @@ def sd_is_array(obj):
 
 
 def sd_value(obj):
-    """Return the most useful Python scalar for an SDObject."""
+    """Return the most useful Python scalar for an SDObject.
+
+    The Python bindings (see ``qrenderdoc/Code/pyrenderdoc/renderdoc.i``)
+    only expose ``AsInt()``, ``AsFloat()``, ``AsString()``, ``AsResourceId()``.
+    ``AsInt()`` handles both signed and unsigned. Booleans and raw data go
+    through ``obj.data.basic.*`` directly.
+    """
     if obj is None:
         return None
     bt = _basetype(obj)
@@ -130,24 +136,16 @@ def sd_value(obj):
         if bt == "String":
             return str(obj.AsString())
         if bt == "Boolean":
-            try:
-                return bool(obj.AsBool())
-            except Exception:
-                return bool(obj.data.basic.b) if hasattr(obj, "data") else None
+            return bool(obj.data.basic.b)
         if bt == "Float":
-            try:
-                return float(obj.AsFloat())
-            except Exception:
-                return float(obj.data.basic.d) if hasattr(obj, "data") else None
-        if bt == "SignedInteger":
-            return int(obj.AsInt64())
-        if bt == "UnsignedInteger":
-            return int(obj.AsUInt64())
+            return float(obj.AsFloat())
+        if bt in ("SignedInteger", "UnsignedInteger"):
+            return int(obj.AsInt())
         if bt == "Enum":
             try:
                 return ("Enum", str(obj.AsString()))
             except Exception:
-                return ("Enum", int(obj.AsUInt64()))
+                return ("Enum", int(obj.AsInt()))
     except Exception:
         pass
     return None
@@ -183,7 +181,7 @@ def sd_to_python(obj, max_depth: int = 8):
 def sd_uint(obj, name: str, default: int = 0) -> int:
     c = sd_child(obj, name)
     try:
-        return int(c.AsUInt64()) if c is not None else default
+        return int(c.AsInt()) if c is not None else default
     except Exception:
         return default
 
@@ -191,7 +189,7 @@ def sd_uint(obj, name: str, default: int = 0) -> int:
 def sd_int(obj, name: str, default: int = 0) -> int:
     c = sd_child(obj, name)
     try:
-        return int(c.AsInt64()) if c is not None else default
+        return int(c.AsInt()) if c is not None else default
     except Exception:
         return default
 
@@ -222,9 +220,77 @@ def sd_enum_str(obj, name: str, default: str = "") -> str:
         return str(c.AsString())
     except Exception:
         try:
-            return str(int(c.AsUInt64()))
+            return str(int(c.AsInt()))
         except Exception:
             return default
+
+
+def read_portable_handle(obj) -> Optional[Tuple[Any, int]]:
+    """Return ``(heap_ResourceId, slot)`` from a PortableHandle SDObject, or
+    ``None`` if ``obj`` isn't a PortableHandle.
+
+    Every D3D12 CPU/GPU descriptor handle is serialised as a small struct
+    ``{ ResourceId heap; uint32 index; }``. We don't try to identify the
+    PortableHandle by type name — we just look for two children named
+    ``heap`` and ``index``.
+    """
+    if obj is None:
+        return None
+    heap = sd_child(obj, "heap")
+    idx = sd_child(obj, "index")
+    if heap is None or idx is None:
+        return None
+    try:
+        return (heap.AsResourceId(), int(idx.AsInt()))
+    except Exception:
+        return None
+
+
+def _register_implicit_heap(ctx: "ExportContext", heap_id) -> Optional[str]:
+    """If a chunk references a descriptor heap we never saw created — typically
+    because the heap pre-existed the captured frame and RenderDoc serialised
+    it via an internal-state chunk we don't fully reconstruct — register a
+    placeholder name so the resulting C++ still references *something* and
+    the user can stub in a heap creation manually.
+    """
+    if heap_id is None or str(heap_id) in ("ResourceId()", "0"):
+        return None
+    if ctx.names.has(heap_id):
+        return ctx.names.lookup(heap_id)
+    name = ctx.names.assign(heap_id, "DescriptorHeap")
+    ctx.add_decl(f"extern ComPtr<ID3D12DescriptorHeap> {name}; "
+                 f"// TODO: pre-existing heap {heap_id}; create with the right type/size")
+    return name
+
+
+def cpu_handle_expr(ctx: "ExportContext", obj) -> str:
+    """Build the C++ expression for the CPU descriptor handle described by
+    ``obj`` (a PortableHandle SDObject)."""
+    ph = read_portable_handle(obj)
+    if ph is None:
+        return "D3D12_CPU_DESCRIPTOR_HANDLE{0}"
+    heap_id, slot = ph
+    if str(heap_id) in ("ResourceId()", "0"):
+        return "D3D12_CPU_DESCRIPTOR_HANDLE{0}"
+    name = ctx.names.lookup(heap_id) or _register_implicit_heap(ctx, heap_id)
+    if not name:
+        return f"D3D12_CPU_DESCRIPTOR_HANDLE{{0}} /* unresolved heap {heap_id} slot {slot} */"
+    return f"CpuHandle({name}.Get(), {slot})"
+
+
+def gpu_handle_expr(ctx: "ExportContext", obj) -> str:
+    """Build the C++ expression for the GPU descriptor handle described by
+    ``obj`` (a PortableHandle SDObject)."""
+    ph = read_portable_handle(obj)
+    if ph is None:
+        return "D3D12_GPU_DESCRIPTOR_HANDLE{0}"
+    heap_id, slot = ph
+    if str(heap_id) in ("ResourceId()", "0"):
+        return "D3D12_GPU_DESCRIPTOR_HANDLE{0}"
+    name = ctx.names.lookup(heap_id) or _register_implicit_heap(ctx, heap_id)
+    if not name:
+        return f"D3D12_GPU_DESCRIPTOR_HANDLE{{0}} /* unresolved heap {heap_id} slot {slot} */"
+    return f"GpuHandle({name}.Get(), {slot})"
 
 
 # ---------------------------------------------------------------------------
@@ -422,8 +488,16 @@ def declare_resource(ctx: ExportContext, rid, kind: str, cpp_type: str) -> Optio
     return name
 
 
-def use_resource(ctx: ExportContext, rid) -> str:
-    """Return the C++ variable name for ``rid``, or a placeholder if unknown."""
+def use_resource(ctx: ExportContext, rid, *, register_as: Optional[Tuple[str, str]] = None) -> str:
+    """Return the C++ variable name for ``rid``, or a placeholder if unknown.
+
+    If ``register_as`` is provided as ``(kind, cpp_type)`` and ``rid`` is
+    unknown, register a placeholder declaration so the resulting C++ at
+    least references *something* the user can fill in. This is the right
+    behaviour for resources we see being used (e.g. via CreateRenderTargetView)
+    but never saw being created (typically swap chain back buffers or
+    pre-existing heaps).
+    """
     if rid is None:
         return "nullptr"
     s = str(rid)
@@ -432,6 +506,14 @@ def use_resource(ctx: ExportContext, rid) -> str:
     name = ctx.names.lookup(rid)
     if name:
         return f"{name}.Get()"
+    if register_as is not None:
+        kind, cpp_type = register_as
+        new_name = ctx.names.assign(rid, kind)
+        ctx.add_decl(
+            f"extern ComPtr<{cpp_type}> {new_name}; "
+            f"// TODO: pre-existing {kind} {s} (provide your own creation)"
+        )
+        return f"{new_name}.Get()"
     return f"/* unresolved {s} */ nullptr"
 
 
@@ -726,60 +808,125 @@ def emit_create_fence(ctx: ExportContext, chunk) -> None:
     )
 
 
-def _emit_create_view_common(ctx: ExportContext, chunk, method: str) -> None:
-    desc = sd_child(chunk, "pDesc")
-    dest = sd_child(chunk, "DestDescriptor")
-    res = sd_resource(chunk, "pResource")
-    # We can't reproduce arbitrary CPU descriptor handles without a heap layout
-    # tracker — emit a clear stub.
-    res_arg = use_resource(ctx, res) if res is not None else "nullptr"
-    ctx.emit(
-        f"  /* TODO {method}: dest is a CPU descriptor handle into a registered heap. "
-        f"Resource={res_arg} */"
-    )
+def _view_desc_subobject(chunk):
+    """Locate the ``desc`` SDObject (the D3D12Descriptor struct serialised by
+    Serialise_DynamicDescriptorWrite). Falls back to ``pDesc`` if the chunk
+    doesn't follow the DynamicDescriptorWrite layout.
+    """
+    return sd_child(chunk, "desc") or sd_child(chunk, "pDesc")
+
+
+def _view_destination(chunk):
+    """Locate the destination PortableHandle on a view-creation chunk."""
+    return sd_child(chunk, "dst") or sd_child(chunk, "DestDescriptor")
+
+
+def _view_resource(chunk):
+    """Locate the view's target resource ID from the chunk's `desc.Resource`
+    field (Serialise_DynamicDescriptorWrite layout) or the explicit `pResource`
+    argument when the chunk has one.
+    """
+    desc = _view_desc_subobject(chunk)
+    if desc is not None:
+        rid = sd_resource(desc, "Resource")
+        if rid is not None:
+            return rid
+    return sd_resource(chunk, "pResource")
 
 
 @emitter("ID3D12Device::CreateConstantBufferView")
 def emit_create_cbv(ctx, chunk):
-    _emit_create_view_common(ctx, chunk, "CreateConstantBufferView")
+    dst = cpu_handle_expr(ctx, _view_destination(chunk))
+    desc = _view_desc_subobject(chunk)
+    cbv = sd_child(desc, "Descriptor") if desc is not None else None
+    addr = sd_uint(cbv, "BufferLocation", 0)
+    size = sd_uint(cbv, "SizeInBytes", 0)
+    ctx.emit(f"  {{")
+    ctx.emit(f"    D3D12_CONSTANT_BUFFER_VIEW_DESC vd = {{ {addr}ull, {size} }};")
+    ctx.emit(f"    device->CreateConstantBufferView(&vd, {dst});")
+    ctx.emit(f"  }}")
 
 
 @emitter("ID3D12Device::CreateShaderResourceView")
 def emit_create_srv(ctx, chunk):
-    _emit_create_view_common(ctx, chunk, "CreateShaderResourceView")
+    dst = cpu_handle_expr(ctx, _view_destination(chunk))
+    res = _view_resource(chunk)
+    res_arg = use_resource(ctx, res, register_as=("Texture2D", "ID3D12Resource"))
+    ctx.emit(
+        f"  /* TODO populate D3D12_SHADER_RESOURCE_VIEW_DESC from desc.Descriptor if non-default */"
+    )
+    ctx.emit(f"  device->CreateShaderResourceView({res_arg}, nullptr, {dst});")
 
 
 @emitter("ID3D12Device::CreateUnorderedAccessView")
 def emit_create_uav(ctx, chunk):
-    _emit_create_view_common(ctx, chunk, "CreateUnorderedAccessView")
+    dst = cpu_handle_expr(ctx, _view_destination(chunk))
+    res = _view_resource(chunk)
+    desc = _view_desc_subobject(chunk)
+    counter = sd_resource(desc, "CounterResource") if desc is not None else None
+    res_arg = use_resource(ctx, res, register_as=("Texture2D", "ID3D12Resource"))
+    cnt_arg = use_resource(ctx, counter, register_as=("Buffer", "ID3D12Resource")) if counter is not None else "nullptr"
+    ctx.emit(f"  /* TODO populate D3D12_UNORDERED_ACCESS_VIEW_DESC from desc.Descriptor if non-default */")
+    ctx.emit(f"  device->CreateUnorderedAccessView({res_arg}, {cnt_arg}, nullptr, {dst});")
 
 
 @emitter("ID3D12Device::CreateRenderTargetView")
 def emit_create_rtv(ctx, chunk):
-    _emit_create_view_common(ctx, chunk, "CreateRenderTargetView")
+    dst = cpu_handle_expr(ctx, _view_destination(chunk))
+    res = _view_resource(chunk)
+    res_arg = use_resource(ctx, res, register_as=("Texture2D", "ID3D12Resource"))
+    ctx.emit(f"  /* TODO populate D3D12_RENDER_TARGET_VIEW_DESC from desc.Descriptor if non-default */")
+    ctx.emit(f"  device->CreateRenderTargetView({res_arg}, nullptr, {dst});")
 
 
 @emitter("ID3D12Device::CreateDepthStencilView")
 def emit_create_dsv(ctx, chunk):
-    _emit_create_view_common(ctx, chunk, "CreateDepthStencilView")
+    dst = cpu_handle_expr(ctx, _view_destination(chunk))
+    res = _view_resource(chunk)
+    res_arg = use_resource(ctx, res, register_as=("Texture2D", "ID3D12Resource"))
+    ctx.emit(f"  /* TODO populate D3D12_DEPTH_STENCIL_VIEW_DESC from desc.Descriptor if non-default */")
+    ctx.emit(f"  device->CreateDepthStencilView({res_arg}, nullptr, {dst});")
 
 
 @emitter("ID3D12Device::CreateSampler")
 @emitter("ID3D12Device11::CreateSampler2")
 def emit_create_sampler(ctx, chunk):
-    _emit_create_view_common(ctx, chunk, "CreateSampler")
+    dst = cpu_handle_expr(ctx, _view_destination(chunk))
+    ctx.emit(f"  {{")
+    ctx.emit(f"    D3D12_SAMPLER_DESC sd = {{}};")
+    ctx.emit(f"    sd.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;")
+    ctx.emit(f"    sd.AddressU = sd.AddressV = sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;")
+    ctx.emit(f"    sd.MaxAnisotropy = 1;")
+    ctx.emit(f"    sd.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;")
+    ctx.emit(f"    sd.MinLOD = 0.0f; sd.MaxLOD = D3D12_FLOAT32_MAX;")
+    ctx.emit(f"    /* TODO populate from desc.Descriptor; default linear-clamp used */")
+    ctx.emit(f"    device->CreateSampler(&sd, {dst});")
+    ctx.emit(f"  }}")
 
 
 @emitter("ID3D12Device::CopyDescriptors")
-def emit_copy_descriptors(ctx: ExportContext, chunk) -> None:
-    ctx.emit(f"  /* TODO CopyDescriptors: multi-range copy, see DescriptorCopies array */")
-
-
 @emitter("ID3D12Device::CopyDescriptorsSimple")
-def emit_copy_descriptors_simple(ctx: ExportContext, chunk) -> None:
-    ctx.emit(
-        f"  /* TODO CopyDescriptorsSimple: dst/src PortableHandles, see DescriptorCopies array */"
-    )
+def emit_copy_descriptors(ctx: ExportContext, chunk) -> None:
+    # Both chunk kinds serialise as a `DescriptorCopies` array of
+    # { type, dst (PortableHandle), src (PortableHandle) } via
+    # Serialise_DynamicDescriptorCopies. We expand each entry to a one-slot
+    # CopyDescriptorsSimple at replay; the captured driver does the same.
+    copies = sd_child(chunk, "DescriptorCopies")
+    if copies is None or copies.NumChildren() == 0:
+        ctx.emit(f"  /* CopyDescriptors: empty DescriptorCopies array */")
+        return
+    n = copies.NumChildren()
+    for i in range(n):
+        c = copies.GetChild(i)
+        if c is None:
+            continue
+        # The type field on each entry is a D3D12_DESCRIPTOR_HEAP_TYPE.
+        heap_type = sd_enum_str(c, "type", "D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV")
+        dst = cpu_handle_expr(ctx, sd_child(c, "dst"))
+        src = cpu_handle_expr(ctx, sd_child(c, "src"))
+        ctx.emit(
+            f"  device->CopyDescriptorsSimple(1, {dst}, {src}, {enum_token(heap_type)});"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -874,9 +1021,8 @@ def emit_set_desc_heaps(ctx, chunk):
 def _emit_set_root_table(ctx, chunk, method: str):
     cv = cmdlist_var(ctx, chunk)
     idx = sd_uint(chunk, "RootParameterIndex", 0)
-    # DescriptorTable arg is a GPU handle; emit a placeholder until we have a
-    # GPU descriptor handle tracker.
-    ctx.emit(f"  {cv}->{method}({idx}, /* TODO GPU descriptor handle */ {{0}});")
+    handle = gpu_handle_expr(ctx, sd_child(chunk, "BaseDescriptor"))
+    ctx.emit(f"  {cv}->{method}({idx}, {handle});")
 
 
 @emitter("ID3D12GraphicsCommandList::SetGraphicsRootDescriptorTable")
@@ -1007,9 +1153,42 @@ def emit_ia_set_vb(ctx, chunk):
 
 @emitter("ID3D12GraphicsCommandList::OMSetRenderTargets")
 def emit_om_set_rts(ctx, chunk):
-    ctx.emit(
-        f"  /* TODO OMSetRenderTargets: read pRenderTargetDescriptors + pDepthStencilDescriptor */"
-    )
+    cv = cmdlist_var(ctx, chunk)
+    num = sd_uint(chunk, "NumRenderTargetDescriptors", 0)
+    rts_contiguous = bool(sd_value(sd_child(chunk, "RTsSingleHandleToDescriptorRange")))
+    rts = sd_child(chunk, "pRenderTargetDescriptors")
+    dsv = sd_child(chunk, "pDepthStencilDescriptor")
+    if rts is None or num == 0:
+        rt_block = "0, nullptr"
+    else:
+        # Build an array literal of CPU handles. If RTsSingleHandleToDescriptorRange
+        # is true the original code passed a single handle; we still expand
+        # each slot explicitly so the runtime call is unambiguous.
+        ctx.emit(f"  {{")
+        ctx.emit(f"    D3D12_CPU_DESCRIPTOR_HANDLE rts[{num if num > 0 else 1}] = {{}};")
+        for i in range(min(num, rts.NumChildren())):
+            ctx.emit(f"    rts[{i}] = {cpu_handle_expr(ctx, rts.GetChild(i))};")
+        if dsv is not None:
+            dsv_expr = cpu_handle_expr(ctx, dsv)
+            ctx.emit(
+                f"    D3D12_CPU_DESCRIPTOR_HANDLE dsv = {dsv_expr};"
+            )
+            dsv_ref = "&dsv"
+        else:
+            dsv_ref = "nullptr"
+        contig = "TRUE" if rts_contiguous else "FALSE"
+        ctx.emit(f"    {cv}->OMSetRenderTargets({num}, rts, {contig}, {dsv_ref});")
+        ctx.emit(f"  }}")
+        return
+    # Empty path
+    if dsv is not None:
+        dsv_expr = cpu_handle_expr(ctx, dsv)
+        ctx.emit(
+            f"  {{ D3D12_CPU_DESCRIPTOR_HANDLE dsv = {dsv_expr};"
+            f" {cv}->OMSetRenderTargets(0, nullptr, FALSE, &dsv); }}"
+        )
+    else:
+        ctx.emit(f"  {cv}->OMSetRenderTargets(0, nullptr, FALSE, nullptr);")
 
 
 @emitter("ID3D12GraphicsCommandList::OMSetBlendFactor")
@@ -1073,12 +1252,13 @@ def emit_rs_set_scissors(ctx, chunk):
 def emit_clear_rtv(ctx, chunk):
     color = sd_child(chunk, "ColorRGBA")
     if color is None or color.NumChildren() < 4:
-        ctx.emit(f"  /* TODO ClearRenderTargetView: missing color */")
+        ctx.emit(f"  /* ClearRenderTargetView: missing color */")
         return
     vals = [cpp_float(sd_value(color.GetChild(i)) or 0.0) for i in range(4)]
+    handle = cpu_handle_expr(ctx, sd_child(chunk, "RenderTargetView"))
     ctx.emit(
         f"  {{ FLOAT c[4] = {{ {', '.join(vals)} }};"
-        f" {cmdlist_var(ctx, chunk)}->ClearRenderTargetView(/* TODO RTV handle */ {{0}}, c, 0, nullptr); }}"
+        f" {cmdlist_var(ctx, chunk)}->ClearRenderTargetView({handle}, c, 0, nullptr); }}"
     )
 
 
@@ -1087,20 +1267,44 @@ def emit_clear_dsv(ctx, chunk):
     flags = sd_enum_str(chunk, "ClearFlags", "D3D12_CLEAR_FLAG_DEPTH")
     depth = cpp_float(sd_float(chunk, "Depth", 1.0))
     stencil = sd_uint(chunk, "Stencil", 0)
+    handle = cpu_handle_expr(ctx, sd_child(chunk, "DepthStencilView"))
     ctx.emit(
-        f"  {cmdlist_var(ctx, chunk)}->ClearDepthStencilView(/* TODO DSV handle */ {{0}}, "
+        f"  {cmdlist_var(ctx, chunk)}->ClearDepthStencilView({handle}, "
         f"{enum_token(flags)}, {depth}, {stencil}, 0, nullptr);"
     )
 
 
+def _emit_clear_uav(ctx, chunk, *, float_variant: bool) -> None:
+    cv = cmdlist_var(ctx, chunk)
+    gpu = gpu_handle_expr(ctx, sd_child(chunk, "ViewGPUHandleInCurrentHeap"))
+    cpu = cpu_handle_expr(ctx, sd_child(chunk, "ViewCPUHandle"))
+    res = use_resource(ctx, sd_resource(chunk, "pResource"))
+    values = sd_child(chunk, "Values")
+    if values is None or values.NumChildren() < 4:
+        ctx.emit(f"  /* ClearUnorderedAccessView{'Float' if float_variant else 'Uint'}: missing Values[4] */")
+        return
+    if float_variant:
+        vals = [cpp_float(sd_value(values.GetChild(i)) or 0.0) for i in range(4)]
+        ctx.emit(
+            f"  {{ FLOAT v[4] = {{ {', '.join(vals)} }};"
+            f" {cv}->ClearUnorderedAccessViewFloat({gpu}, {cpu}, {res}, v, 0, nullptr); }}"
+        )
+    else:
+        vals = [str(int(sd_value(values.GetChild(i)) or 0) & 0xFFFFFFFF) + "u" for i in range(4)]
+        ctx.emit(
+            f"  {{ UINT v[4] = {{ {', '.join(vals)} }};"
+            f" {cv}->ClearUnorderedAccessViewUint({gpu}, {cpu}, {res}, v, 0, nullptr); }}"
+        )
+
+
 @emitter("ID3D12GraphicsCommandList::ClearUnorderedAccessViewUint")
 def emit_clear_uav_uint(ctx, chunk):
-    ctx.emit(f"  /* TODO ClearUnorderedAccessViewUint: GPU+CPU handles + resource + UINT[4] */")
+    _emit_clear_uav(ctx, chunk, float_variant=False)
 
 
 @emitter("ID3D12GraphicsCommandList::ClearUnorderedAccessViewFloat")
 def emit_clear_uav_float(ctx, chunk):
-    ctx.emit(f"  /* TODO ClearUnorderedAccessViewFloat: GPU+CPU handles + resource + FLOAT[4] */")
+    _emit_clear_uav(ctx, chunk, float_variant=True)
 
 
 @emitter("ID3D12GraphicsCommandList::CopyResource")
@@ -1473,6 +1677,35 @@ extern ComPtr<ID3D12Device> device;
 
 void RecordCapture(ID3D12Device *dev);
 
+// ---------------------------------------------------------------------------
+// Descriptor handle helpers
+//
+// RenderDoc serialises every D3D12 CPU/GPU descriptor handle as a
+// "PortableHandle" pair of (heap ResourceId, slot index). At replay we
+// rematerialise the actual handle by combining the heap's runtime base
+// address with the descriptor stride for that heap's type:
+//
+//     heap->GetCPUDescriptorHandleForHeapStart() +
+//         slot * device->GetDescriptorHandleIncrementSize(heap->GetDesc().Type)
+//
+// These helpers do that math once, without forcing the generated code to
+// repeat the boilerplate at every binding.
+// ---------------------------------------------------------------------------
+
+static inline D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle(ID3D12DescriptorHeap *heap, UINT slot) {
+    if(!heap) return D3D12_CPU_DESCRIPTOR_HANDLE{0};
+    D3D12_CPU_DESCRIPTOR_HANDLE h = heap->GetCPUDescriptorHandleForHeapStart();
+    h.ptr += SIZE_T(slot) * device->GetDescriptorHandleIncrementSize(heap->GetDesc().Type);
+    return h;
+}
+
+static inline D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle(ID3D12DescriptorHeap *heap, UINT slot) {
+    if(!heap) return D3D12_GPU_DESCRIPTOR_HANDLE{0};
+    D3D12_GPU_DESCRIPTOR_HANDLE h = heap->GetGPUDescriptorHandleForHeapStart();
+    h.ptr += UINT64(slot) * device->GetDescriptorHandleIncrementSize(heap->GetDesc().Type);
+    return h;
+}
+
 """
 
 MAIN_CPP = r"""// Auto-generated by util/automation/export_cpp.py
@@ -1611,7 +1844,9 @@ def _write_output(ctx: ExportContext) -> None:
             if decl.startswith("extern "):
                 f.write(decl[len("extern "):] + "\n")
         f.write("\nvoid RecordCapture(ID3D12Device *dev) {\n")
-        f.write("  ComPtr<ID3D12Device> device; device.Attach(dev); dev->AddRef();\n")
+        f.write("  // The global `device` ComPtr is initialised by main.cpp before this\n")
+        f.write("  // call; the local alias keeps emitter output uniform.\n")
+        f.write("  ID3D12Device *device_raw = dev; (void)device_raw;\n")
         for line in ctx.lines:
             f.write(line + "\n")
         f.write("}\n")
