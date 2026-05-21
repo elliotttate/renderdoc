@@ -24,6 +24,17 @@ without depending on Nsight, generated C++ captures, or ad-hoc scripts.
 | `automation_server` | §15 | Small HTTP/JSON-RPC service around the replay controller |
 | `nonblocking` | §2 | Compatibility / debug-message report (no modal blocking) |
 | `sn2_workflows` | §23 | Concrete SN2 debugging recipes (pso-events, override-fired, first-bad-input, t9-vs-t5, view-cbv-diff) |
+| `descriptor_history` | §4 (full) | Per-(heap,slot) timeline derived by polling `GetDescriptors` at every event — equivalent to driver-side CopyDescriptors tracking for analysis |
+| `d3d12_copy_descriptors` | §4 (driver-recorded) | Direct dump of every `Device_CopyDescriptors[Simple]` and `Create*View` chunk from the structured file |
+| `event_diff` | Nsight Range Compare | Pairwise diff of two events (shaders / bindings / viewports / RT / CBV bytes) |
+| `pair_eye_events` | Nsight Stereo | Auto-pair left/right events by PSO + shader hashes + RT |
+| `shader_debug` | Nsight Shader Profiler | Wrap `DebugPixel` / `DebugThread`; side-by-side compare same pixel on two events |
+| `eye_image_diff` | Nsight Image Compare | Per-channel image diff of an RT between two events; optional left/right PNG snapshots |
+| `geometry_diff` | Nsight Geometry Pipeline | `GetPostVSData` per stage + pairwise comparison |
+| `barrier_history` | Nsight State Tracking | Per-resource state-transition timeline |
+| `perf_counters` | Nsight Range Profiler | Per-event GPU counters via `FetchCounters` |
+| `cbv_decode` | Nsight CBV Decoder | Decode CBVs into named struct fields via `GetCBufferVariableContents` + pairwise field diff |
+| `compare_eyes` | end-to-end | Pair events, run event_diff + image_diff + geometry_diff (+ optional shader_debug) on each, rank by divergence |
 
 The same functionality is exposed by the C++ subcommands in `renderdoccmd`:
 `renderdoccmd index-capture`, `renderdoccmd state-at-event`, etc.
