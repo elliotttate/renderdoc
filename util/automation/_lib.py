@@ -278,18 +278,21 @@ def collect_state_at_event(controller, event_id: int) -> dict:
             refl = None
         reflection_by_stage[shader_stage_name(stage_enum)] = refl
 
-    # Shaders
+    # Shaders. Stages absent from reflection_by_stage (e.g. older D3D12
+    # PSOs without Amplification/Mesh) silently become None instead of
+    # raising KeyError.
     shaders = []
-    for stage_enum, refl in (
-        (rd.ShaderStage.Vertex, reflection_by_stage["Vertex"]),
-        (rd.ShaderStage.Hull, reflection_by_stage["Hull"]),
-        (rd.ShaderStage.Domain, reflection_by_stage["Domain"]),
-        (rd.ShaderStage.Geometry, reflection_by_stage["Geometry"]),
-        (rd.ShaderStage.Pixel, reflection_by_stage["Pixel"]),
-        (rd.ShaderStage.Compute, reflection_by_stage["Compute"]),
-        (rd.ShaderStage.Amplification, reflection_by_stage["Amplification"]),
-        (rd.ShaderStage.Mesh, reflection_by_stage["Mesh"]),
+    for stage_enum, stage_name in (
+        (rd.ShaderStage.Vertex, "Vertex"),
+        (rd.ShaderStage.Hull, "Hull"),
+        (rd.ShaderStage.Domain, "Domain"),
+        (rd.ShaderStage.Geometry, "Geometry"),
+        (rd.ShaderStage.Pixel, "Pixel"),
+        (rd.ShaderStage.Compute, "Compute"),
+        (rd.ShaderStage.Amplification, "Amplification"),
+        (rd.ShaderStage.Mesh, "Mesh"),
     ):
+        refl = reflection_by_stage.get(stage_name)
         if refl is None:
             continue
         shaders.append(
