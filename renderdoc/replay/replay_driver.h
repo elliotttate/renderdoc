@@ -201,6 +201,17 @@ public:
   }
 
   virtual void GetBufferData(ResourceId buff, uint64_t offset, uint64_t len, bytebuf &retData) = 0;
+  // Write `data` into the buffer's GPU storage starting at `offset`. Drivers
+  // that don't support real GPU writes should return false; the controller
+  // will fall back to the analysis-only override in that case. Default
+  // implementation here just returns false to keep optional backends working.
+  virtual bool SetBufferGPUData(ResourceId buff, uint64_t offset, const bytebuf &data)
+  {
+    (void)buff;
+    (void)offset;
+    (void)data;
+    return false;
+  }
   virtual void GetTextureData(ResourceId tex, const Subresource &sub,
                               const GetTextureDataParams &params, bytebuf &data) = 0;
 

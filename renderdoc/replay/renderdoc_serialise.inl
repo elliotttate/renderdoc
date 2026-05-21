@@ -504,6 +504,7 @@ void DoSerialise(SerialiserType &ser, DescriptorWriteRecord &el)
   SERIALISE_MEMBER(srcHeap);
   SERIALISE_MEMBER(srcSlot);
   SERIALISE_MEMBER(resource);
+  SERIALISE_MEMBER(callstack);
 }
 
 template <typename SerialiserType>

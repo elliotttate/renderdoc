@@ -859,8 +859,7 @@ earlier one. Use :meth:`ClearBufferOverride` to drop them.
   GPU replay. The override changes what RenderDoc's analysis surfaces (and,
   importantly, what the shader debugger sees when stepping through a shader
   that reads the CBV), but not what the GPU itself reads. For a true
-  GPU-side override, combine this with a :meth:`ReplaceResource` shader swap
-  that rewrites the consuming shader to read the patched bytes.
+  GPU-side override use :meth:`SetBufferOverrideGPU` instead.
 
 :param ResourceId buffer: The buffer to override.
 :param int offset: The byte offset within the buffer to start overriding.
@@ -873,6 +872,39 @@ earlier one. Use :meth:`ClearBufferOverride` to drop them.
 :param ResourceId buffer: The buffer whose overrides should be cleared.
 )");
   virtual void ClearBufferOverride(ResourceId buffer) = 0;
+
+  DOCUMENT(R"(Override a buffer's actual GPU contents at replay time.
+
+Unlike :meth:`SetBufferOverride`, this writes the patched bytes into the
+buffer's GPU storage so that real GPU draws see the override. The
+controller layers the analysis-side override on top as well, so
+``GetBufferData`` / ``GetCBufferVariableContents`` and the shader debugger
+also see the patched values.
+
+The upload happens via the replay driver's CPU→GPU upload path
+(typically an UPLOAD heap + ``CopyBufferRegion`` for D3D12). The override
+is applied once per ``SetFrameEvent`` so the buffer's contents are
+restored to the captured state before each event begins and then patched
+before the next event runs. Use :meth:`ClearBufferOverrideGPU` to undo.
+
+Returns ``true`` if the upload was issued successfully, ``false`` if the
+underlying driver does not support real GPU buffer overrides (in which
+case the analysis-only override from :meth:`SetBufferOverride` still
+applies).
+
+:param ResourceId buffer: The buffer to override.
+:param int offset: The byte offset within the buffer to start overriding.
+:param bytes data: The replacement bytes.
+:return: Whether the GPU upload was applied.
+:rtype: bool
+)");
+  virtual bool SetBufferOverrideGPU(ResourceId buffer, uint64_t offset, const bytebuf &data) = 0;
+
+  DOCUMENT(R"(Remove all GPU-side overrides previously set on a buffer.
+
+:param ResourceId buffer: The buffer whose GPU overrides should be cleared.
+)");
+  virtual void ClearBufferOverrideGPU(ResourceId buffer) = 0;
 
   DOCUMENT(R"(Walk the structured file and return a normalized record for every D3D12
 descriptor heap mutation observed during the recorded frame.

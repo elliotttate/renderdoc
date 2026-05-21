@@ -161,6 +161,10 @@ public:
   SDFile &GetStructuredFile() { return *m_StructuredFile; }
   void WriteStructuredFile(const SDFile &file, RENDERDOC_ProgressCallback progress);
   void SetActionChunk() { m_ActionChunk = true; }
+  // Flag this chunk as a descriptor mutation (CopyDescriptors[Simple] / CreateXxxView)
+  // so the callstack collection logic can opt in to recording call stacks for it
+  // without forcing the global captureCallstacks-everywhere mode.
+  void SetDescriptorChunk() { m_DescriptorChunk = true; }
   // the struct argument allows nested structs to pass a bit of data so a child struct can have
   // context from a parent struct if needed to serialise properly. Rarely used, primarily to be able
   // to flag if some context-sensitive members might be invalid
@@ -1639,6 +1643,7 @@ private:
   // See SetStreamingMode
   bool m_DataStreaming = false;
   bool m_ActionChunk = false;
+  bool m_DescriptorChunk = false;
   bool m_Structuriser = false;
 
   uint64_t m_LastChunkOffset = 0;

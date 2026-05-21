@@ -889,6 +889,16 @@ For ``Create*View`` mutations this is empty.
 :type: ResourceId
 )");
   ResourceId resource;
+
+  DOCUMENT(R"(CPU call-stack frames captured at the time of the descriptor mutation, when
+``CaptureOptions::captureCallstacks`` was enabled on capture (the addresses are
+resolved to function names by the standard ``ResolveCallstack`` flow).
+
+Empty when no callstack was captured for the originating chunk.
+
+:type: List[int]
+)");
+  rdcarray<uint64_t> callstack;
 };
 
 DECLARE_REFLECTION_STRUCT(DescriptorWriteRecord);

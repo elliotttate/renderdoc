@@ -3427,6 +3427,101 @@ void D3D12Replay::GetBufferData(ResourceId buff, uint64_t offset, uint64_t lengt
   GetDebugManager()->GetBufferData(buffer, offset, length, ret);
 }
 
+bool D3D12Replay::SetBufferGPUData(ResourceId buff, uint64_t offset, const bytebuf &data)
+{
+  if(data.empty())
+    return false;
+
+  auto it = m_pDevice->GetResourceList().find(buff);
+  if(it == m_pDevice->GetResourceList().end() || it->second == NULL)
+  {
+    RDCERR("SetBufferGPUData: unknown buffer %s", ToStr(buff).c_str());
+    return false;
+  }
+
+  WrappedID3D12Resource *dst = it->second;
+  if(dst->GetDesc().Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
+  {
+    RDCERR("SetBufferGPUData: not a buffer %s", ToStr(buff).c_str());
+    return false;
+  }
+
+  // Allocate a small UPLOAD-heap buffer with the patched bytes.
+  D3D12_HEAP_PROPERTIES uploadHeap = {};
+  uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+  uploadHeap.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+  uploadHeap.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+  uploadHeap.CreationNodeMask = 1;
+  uploadHeap.VisibleNodeMask = 1;
+
+  D3D12_RESOURCE_DESC uploadDesc = {};
+  uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  uploadDesc.Width = data.size();
+  uploadDesc.Height = 1;
+  uploadDesc.DepthOrArraySize = 1;
+  uploadDesc.MipLevels = 1;
+  uploadDesc.Format = DXGI_FORMAT_UNKNOWN;
+  uploadDesc.SampleDesc.Count = 1;
+  uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  uploadDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+  ID3D12Resource *uploadBuf = NULL;
+  HRESULT hr = m_pDevice->GetReal()->CreateCommittedResource(
+      &uploadHeap, D3D12_HEAP_FLAG_NONE, &uploadDesc, D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
+      __uuidof(ID3D12Resource), (void **)&uploadBuf);
+  if(FAILED(hr) || uploadBuf == NULL)
+  {
+    RDCERR("SetBufferGPUData: failed to allocate upload buffer (HRESULT 0x%08X)", hr);
+    return false;
+  }
+
+  // Copy bytes into the upload buffer
+  void *mapped = NULL;
+  D3D12_RANGE noRead = {0, 0};
+  hr = uploadBuf->Map(0, &noRead, &mapped);
+  if(FAILED(hr) || mapped == NULL)
+  {
+    SAFE_RELEASE(uploadBuf);
+    RDCERR("SetBufferGPUData: failed to map upload buffer");
+    return false;
+  }
+  memcpy(mapped, data.data(), data.size());
+  uploadBuf->Unmap(0, NULL);
+
+  // Issue a copy on the debug command list, then wait for completion.
+  ID3D12GraphicsCommandList *list = GetDebugManager()->ResetDebugList();
+  if(list == NULL)
+  {
+    SAFE_RELEASE(uploadBuf);
+    RDCERR("SetBufferGPUData: no debug command list available");
+    return false;
+  }
+
+  // Transition the destination buffer to COPY_DEST, copy, then back.
+  D3D12_RESOURCE_BARRIER toCopy = {};
+  toCopy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  toCopy.Transition.pResource = dst->GetReal();
+  toCopy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  toCopy.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+  toCopy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+  list->ResourceBarrier(1, &toCopy);
+
+  list->CopyBufferRegion(dst->GetReal(), offset, uploadBuf, 0, data.size());
+
+  D3D12_RESOURCE_BARRIER toCommon = toCopy;
+  toCommon.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  toCommon.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+  list->ResourceBarrier(1, &toCommon);
+
+  list->Close();
+  ID3D12CommandList *lists[] = {list};
+  m_pDevice->GetQueue()->GetReal()->ExecuteCommandLists(1, lists);
+  m_pDevice->DeviceWaitForIdle();
+
+  SAFE_RELEASE(uploadBuf);
+  return true;
+}
+
 void D3D12Replay::FillCBufferVariables(ResourceId pipeline, ResourceId shader, ShaderStage stage,
                                        rdcstr entryPoint, uint32_t cbufSlot,
                                        rdcarray<ShaderVariable> &outvars, const bytebuf &data)

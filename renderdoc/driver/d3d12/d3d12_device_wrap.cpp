@@ -1424,6 +1424,7 @@ void WrappedID3D12Device::CreateConstantBufferView(const D3D12_CONSTANT_BUFFER_V
       CACHE_THREAD_SERIALISER();
 
       SCOPED_SERIALISE_CHUNK(D3D12Chunk::Device_CreateConstantBufferView);
+      ser.SetDescriptorChunk();
       Serialise_DynamicDescriptorWrite(ser, &write);
 
       m_FrameCaptureRecord->AddChunk(scope.Get());
@@ -1467,6 +1468,7 @@ void WrappedID3D12Device::CreateShaderResourceView(ID3D12Resource *pResource,
       CACHE_THREAD_SERIALISER();
 
       SCOPED_SERIALISE_CHUNK(D3D12Chunk::Device_CreateShaderResourceView);
+      ser.SetDescriptorChunk();
       Serialise_DynamicDescriptorWrite(ser, &write);
 
       m_FrameCaptureRecord->AddChunk(scope.Get());
@@ -1516,6 +1518,7 @@ void WrappedID3D12Device::CreateUnorderedAccessView(ID3D12Resource *pResource,
       CACHE_THREAD_SERIALISER();
 
       SCOPED_SERIALISE_CHUNK(D3D12Chunk::Device_CreateUnorderedAccessView);
+      ser.SetDescriptorChunk();
       Serialise_DynamicDescriptorWrite(ser, &write);
 
       m_FrameCaptureRecord->AddChunk(scope.Get());
@@ -1560,6 +1563,7 @@ void WrappedID3D12Device::CreateRenderTargetView(ID3D12Resource *pResource,
       CACHE_THREAD_SERIALISER();
 
       SCOPED_SERIALISE_CHUNK(D3D12Chunk::Device_CreateRenderTargetView);
+      ser.SetDescriptorChunk();
       Serialise_DynamicDescriptorWrite(ser, &write);
 
       m_FrameCaptureRecord->AddChunk(scope.Get());
@@ -1596,6 +1600,7 @@ void WrappedID3D12Device::CreateDepthStencilView(ID3D12Resource *pResource,
       CACHE_THREAD_SERIALISER();
 
       SCOPED_SERIALISE_CHUNK(D3D12Chunk::Device_CreateDepthStencilView);
+      ser.SetDescriptorChunk();
       Serialise_DynamicDescriptorWrite(ser, &write);
 
       m_FrameCaptureRecord->AddChunk(scope.Get());
@@ -1630,6 +1635,7 @@ void WrappedID3D12Device::CreateSampler(const D3D12_SAMPLER_DESC *pDesc,
       CACHE_THREAD_SERIALISER();
 
       SCOPED_SERIALISE_CHUNK(D3D12Chunk::Device_CreateSampler);
+      ser.SetDescriptorChunk();
       Serialise_DynamicDescriptorWrite(ser, &write);
 
       m_FrameCaptureRecord->AddChunk(scope.Get());
@@ -2167,6 +2173,7 @@ void WrappedID3D12Device::CopyDescriptors(
       CACHE_THREAD_SERIALISER();
 
       SCOPED_SERIALISE_CHUNK(D3D12Chunk::Device_CopyDescriptors);
+      ser.SetDescriptorChunk();
       Serialise_DynamicDescriptorCopies(ser, copies);
 
       m_FrameCaptureRecord->AddChunk(scope.Get());
@@ -2236,6 +2243,7 @@ void WrappedID3D12Device::CopyDescriptorsSimple(UINT NumDescriptors,
       CACHE_THREAD_SERIALISER();
 
       SCOPED_SERIALISE_CHUNK(D3D12Chunk::Device_CopyDescriptorsSimple);
+      ser.SetDescriptorChunk();
       Serialise_DynamicDescriptorCopies(ser, copies);
 
       m_FrameCaptureRecord->AddChunk(scope.Get());

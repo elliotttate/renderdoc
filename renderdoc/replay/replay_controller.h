@@ -196,6 +196,8 @@ public:
   rdcarray<DescriptorWriteRecord> GetDescriptorWrites();
   void SetBufferOverride(ResourceId buffer, uint64_t offset, const bytebuf &data);
   void ClearBufferOverride(ResourceId buffer);
+  bool SetBufferOverrideGPU(ResourceId buffer, uint64_t offset, const bytebuf &data);
+  void ClearBufferOverrideGPU(ResourceId buffer);
   const rdcarray<ResourceDescription> &GetResources();
   rdcarray<DebugMessage> GetDebugMessages();
   ResultDetails GetFatalErrorStatus()

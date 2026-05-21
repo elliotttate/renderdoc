@@ -575,6 +575,7 @@ static void EmitCopyDescriptorsRecords(const SDChunk *chunk, uint32_t chunkIndex
     rec.chunkOffset = (uint32_t)i;
     rec.timestampMicro = chunk->metadata.timestampMicro;
     rec.threadID = chunk->metadata.threadID;
+    rec.callstack = chunk->metadata.callstack;
     rec.destHeap = dstHeap;
     rec.destSlot = dstSlot;
     rec.srcHeap = srcHeap;
@@ -777,6 +778,34 @@ void ReplayController::ClearBufferOverride(ResourceId buffer)
   CHECK_REPLAY_THREAD();
 
   m_BufferOverrides.erase(buffer);
+}
+
+bool ReplayController::SetBufferOverrideGPU(ResourceId buffer, uint64_t offset,
+                                            const bytebuf &data)
+{
+  CHECK_REPLAY_THREAD();
+
+  if(buffer == ResourceId() || data.isEmpty())
+    return false;
+
+  // Layer the analysis-side override too so GetBufferData / shader debugger
+  // see the patched bytes.
+  SetBufferOverride(buffer, offset, data);
+
+  // Ask the driver to write the bytes into GPU storage. If the backend
+  // doesn't support it, the analysis-side override is still in effect.
+  return m_pDevice->SetBufferGPUData(buffer, offset, data);
+}
+
+void ReplayController::ClearBufferOverrideGPU(ResourceId buffer)
+{
+  CHECK_REPLAY_THREAD();
+
+  ClearBufferOverride(buffer);
+  // Restore the buffer to its captured state by re-applying empty bytes.
+  // Drivers can interpret an empty override as "reset to captured contents".
+  bytebuf empty;
+  m_pDevice->SetBufferGPUData(buffer, 0, empty);
 }
 
 bytebuf ReplayController::GetTextureData(ResourceId tex, const Subresource &sub)
