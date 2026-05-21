@@ -15,8 +15,16 @@ Profile schema (JSON):
   "capture_frame": 600,
   "capture_delay_seconds": 10.0,
   "out_dir": "<dir to save captures>",
-  "output_name_prefix": "sn2_clean"
+  "output_name_prefix": "sn2_clean",
+  "suppress_incompat_modals": true
 }
+
+`suppress_incompat_modals` mirrors the qrenderdoc
+``Config().AutomationSuppressIncompatModals`` setting. When ``true``, the
+launcher writes the flag into the per-user RenderDoc config before invoking
+the target so any subsequent qrenderdoc replay of the produced capture
+does not surface the "Suggest remote replay" / "capture API may not behave
+correctly" modals. Fatal modals are unaffected.
 
 Usage:
     python -m util.automation.launch_profile run <profile.json>
@@ -81,12 +89,51 @@ def _make_environment(mode: str) -> list:
     return mods
 
 
+def _apply_modal_suppression(suppress: bool) -> Optional[str]:
+    """Write the qrenderdoc PersistantConfig override for modal suppression.
+
+    Returns the path that was patched on success, or ``None`` if no
+    qrenderdoc config exists yet. We rewrite the JSON in place if the file
+    exists; otherwise we leave it alone — qrenderdoc will pick up the
+    setting from its default schema once it starts.
+    """
+    if not suppress:
+        return None
+    candidates = []
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            candidates.append(os.path.join(appdata, "qrenderdoc", "UI.config"))
+    else:
+        home = os.path.expanduser("~")
+        candidates.append(os.path.join(home, ".local", "share", "qrenderdoc", "UI.config"))
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                txt = f.read()
+            cfg = json.loads(txt)
+        except Exception:
+            continue
+        cfg["AutomationSuppressIncompatModals"] = True
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+        except Exception:
+            continue
+        return path
+    return None
+
+
 def run(profile: dict) -> dict:
     if not validate(profile)["ok"]:
         return {"ok": False, "validate": validate(profile)}
 
     rd.InitialiseReplay(rd.GlobalEnvironment(), [])
     try:
+        modal_patched = _apply_modal_suppression(bool(profile.get("suppress_incompat_modals", False)))
+
         out_dir = profile.get("out_dir") or os.getcwd()
         os.makedirs(out_dir, exist_ok=True)
         prefix = profile.get("output_name_prefix") or profile["name"].replace(" ", "_")
@@ -139,7 +186,7 @@ def run(profile: dict) -> dict:
         except Exception:
             pass
 
-        return {"ok": True, "ident": ident, "captures": captures}
+        return {"ok": True, "ident": ident, "captures": captures, "modalSuppressionPatched": modal_patched}
     finally:
         rd.ShutdownReplay()
 
