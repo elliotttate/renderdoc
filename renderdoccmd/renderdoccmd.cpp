@@ -1574,6 +1574,12 @@ int renderdoccmd(GlobalEnvironment &env, std::vector<std::string> &argv)
     add_command("convert", new ConvertCommand());
     add_command("embed", new EmbeddedSectionCommand(false));
     add_command("extract", new EmbeddedSectionCommand(true));
+
+    // UEVR / Nsight-style automation subcommands (see
+    // docs/UEVR_NSIGHT_AUTOMATION_ROADMAP.md). Implementations live in
+    // renderdoccmd_automation.cpp.
+    extern void register_automation_commands();
+    register_automation_commands();
 #endif    // !defined(RDOC_SELFCAPTURE_LIMITEDAPI)
 
     if(argv.size() <= 1)

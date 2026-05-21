@@ -194,6 +194,7 @@
     <ClCompile Include="renderdoccmd_apple.cpp">
       <ExcludedFromBuild>true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="renderdoccmd_automation.cpp" />
     <ClCompile Include="renderdoccmd_linux.cpp">
       <ExcludedFromBuild>true</ExcludedFromBuild>
     </ClCompile>

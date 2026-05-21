@@ -1,5 +1,6 @@
 set(sources
     renderdoccmd.cpp
+    renderdoccmd_automation.cpp
     renderdoccmd.h
     3rdparty/cmdline/cmdline.h
     )

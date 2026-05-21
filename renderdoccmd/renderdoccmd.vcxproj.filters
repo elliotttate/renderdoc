@@ -2,6 +2,7 @@
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <ClCompile Include="renderdoccmd.cpp" />
+    <ClCompile Include="renderdoccmd_automation.cpp" />
     <ClCompile Include="renderdoccmd_win32.cpp" />
     <ClCompile Include="..\renderdoc\3rdparty\miniz\miniz.c">
       <Filter>3rdparty</Filter>
