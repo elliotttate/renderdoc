@@ -65,7 +65,8 @@ try:
     log(f"capture: {CAPTURE} ({os.path.getsize(CAPTURE)} bytes)")
     log(f"out: {OUT}")
     log("calling export()...")
-    result = export_cpp.export(CAPTURE, OUT, write_blobs=True)
+    write_blobs = os.environ.get("RENDERDOC_EXPORT_CPP_BLOBS", "1") != "0"
+    result = export_cpp.export(CAPTURE, OUT, write_blobs=write_blobs)
     log(f"RESULT: {result}")
     log("=== SUCCESS ===")
 except Exception:

@@ -453,6 +453,9 @@ class ExportContext:
         self.unhandled: List[Tuple[int, str]] = []
         self.shader_blobs: Dict[str, bytes] = {}    # hash -> bytecode
         self.shader_id_to_hash: Dict[str, str] = {}  # ResourceId str -> hash
+        # (pso_resource_id_str, stage_field) -> shader-bytecode md5
+        # e.g. ("ResourceId::1234", "VS") -> "abcd...md5"
+        self.pso_shader_hashes: Dict[Tuple[str, str], str] = {}
         self.buffer_blobs: Dict[str, bytes] = {}     # name -> bytes
         self.write_blobs = True
         self.first_event: Optional[int] = None
@@ -790,22 +793,53 @@ def _emit_input_layout(ctx, obj, prefix: str, indent: str = "    ") -> None:
     ctx.emit(f"{indent}{prefix}.InputLayout.NumElements = {n};")
 
 
-def _emit_shader_byte_code(ctx, shader_obj, var: str, label: str, indent: str = "    ") -> None:
-    """For each shader stage in a graphics PSO desc (``shader_obj`` is the
-    D3D12_SHADER_BYTECODE subobject), emit a TODO loader comment.
+def _emit_shader_byte_code(
+    ctx, shader_obj, var: str, label: str,
+    pso_rid_str: Optional[str] = None, stage: Optional[str] = None,
+    indent: str = "    ",
+) -> None:
+    """Populate a D3D12_SHADER_BYTECODE field with the corresponding blob.
 
-    The actual bytecode is in ``shader_obj.pShaderBytecode`` as a structured
-    byte array; we don't extract it inline because that bloats the generated
-    source. Instead the user matches the PSO ResourceId against the
-    ``shaders/<hash>.cso`` files extracted via shader reflection.
+    Looks up the (pso_rid, stage) -> hash mapping built by
+    ``_extract_pso_chunk_shader_hashes`` and emits::
+
+        auto <stage>blob = LoadBlob("shaders/<hash>.cso");
+        var.pShaderBytecode = <stage>blob.data();
+        var.BytecodeLength = <stage>blob.size();
+
+    The local blob is scoped to the surrounding ``{ ... }`` block — typically
+    the PSO desc emitter — so it lives until ``CreateXxxPipelineState`` is
+    called.
+
+    If the bytecode wasn't extracted (write_blobs=False, or the lookup
+    failed), falls back to a TODO comment that points at the right file.
     """
     if shader_obj is None:
         return
     bc_len = sd_uint(shader_obj, "BytecodeLength", 0)
     if bc_len == 0:
         return
-    ctx.emit(f"{indent}// TODO {label}: load {bc_len}-byte shader blob from shaders/<hash>.cso "
-             f"and set {var}.pShaderBytecode / .BytecodeLength.")
+    blob_hash = None
+    if pso_rid_str is not None and stage is not None:
+        blob_hash = ctx.pso_shader_hashes.get((pso_rid_str, stage))
+    if blob_hash is None:
+        # Fall back to extracting the bytes inline (per-chunk path may have
+        # been skipped if write_blobs=False or the chunk shape was unusual).
+        if ctx.write_blobs:
+            bc = sd_child(shader_obj, "pShaderBytecode")
+            raw = sd_byte_array(bc) if bc is not None else None
+            if raw:
+                blob_hash = _write_shader_blob(ctx, raw)
+    if blob_hash is None:
+        ctx.emit(f"{indent}// TODO {label}: load {bc_len}-byte shader blob from shaders/<hash>.cso "
+                 f"and set {var}.pShaderBytecode / .BytecodeLength.")
+        return
+    # Derive a local variable name from the field path so multiple stages of
+    # the same PSO don't collide. e.g. "d.VS" -> "vsBlob", "d.CS" -> "csBlob".
+    short = var.rsplit(".", 1)[-1].lower() + "Blob"
+    ctx.emit(f"{indent}auto {short} = LoadBlob(\"shaders/{blob_hash}.cso\");")
+    ctx.emit(f"{indent}{var}.pShaderBytecode = {short}.data();")
+    ctx.emit(f"{indent}{var}.BytecodeLength = {short}.size();")
 
 
 def _emit_pso_common_tail(ctx, desc_obj, var: str, indent: str = "    ") -> None:
@@ -828,6 +862,7 @@ def emit_create_graphics_pso(ctx: ExportContext, chunk) -> None:
     if desc is None:
         ctx.emit(f"  /* CreateGraphicsPipelineState: missing pDesc */")
         return
+    rid_str = str(rid)
     ctx.emit(f"  {{")
     ctx.emit(f"    D3D12_GRAPHICS_PIPELINE_STATE_DESC d = {{}};")
     rs = sd_resource(desc, "pRootSignature")
@@ -836,7 +871,8 @@ def emit_create_graphics_pso(ctx: ExportContext, chunk) -> None:
     for stage_field, label in (("VS", "VS bytecode"), ("PS", "PS bytecode"),
                                 ("DS", "DS bytecode"), ("HS", "HS bytecode"),
                                 ("GS", "GS bytecode")):
-        _emit_shader_byte_code(ctx, sd_child(desc, stage_field), f"d.{stage_field}", label)
+        _emit_shader_byte_code(ctx, sd_child(desc, stage_field), f"d.{stage_field}", label,
+                                pso_rid_str=rid_str, stage=stage_field)
     _emit_blend_state(ctx, sd_child(desc, "BlendState"), "d.BlendState")
     sm = sd_uint(desc, "SampleMask", 0xFFFFFFFF)
     ctx.emit(f"    d.SampleMask = {sm}u;")
@@ -875,12 +911,14 @@ def emit_create_compute_pso(ctx: ExportContext, chunk) -> None:
     if desc is None:
         ctx.emit(f"  /* CreateComputePipelineState: missing pDesc */")
         return
+    rid_str = str(rid)
     ctx.emit(f"  {{")
     ctx.emit(f"    D3D12_COMPUTE_PIPELINE_STATE_DESC d = {{}};")
     rs = sd_resource(desc, "pRootSignature")
     if rs is not None:
         ctx.emit(f"    d.pRootSignature = {use_resource(ctx, rs, register_as=('RootSignature', 'ID3D12RootSignature'))};")
-    _emit_shader_byte_code(ctx, sd_child(desc, "CS"), "d.CS", "CS bytecode")
+    _emit_shader_byte_code(ctx, sd_child(desc, "CS"), "d.CS", "CS bytecode",
+                           pso_rid_str=rid_str, stage="CS")
     _emit_pso_common_tail(ctx, desc, "d")
     ctx.emit(f"    HR(device->CreateComputePipelineState(&d, IID_PPV_ARGS(&{name})));")
     ctx.emit(f"  }}")
@@ -909,6 +947,7 @@ def emit_create_pipeline_state_stream(ctx: ExportContext, chunk) -> None:
     ms_obj = sd_child(desc, "MS")
     ms_len = sd_uint(ms_obj, "BytecodeLength", 0) if ms_obj is not None else 0
 
+    rid_str = str(rid)
     if cs_len > 0:
         # Compute pipeline path
         ctx.emit(f"  {{")
@@ -916,7 +955,8 @@ def emit_create_pipeline_state_stream(ctx: ExportContext, chunk) -> None:
         rs = sd_resource(desc, "pRootSignature")
         if rs is not None:
             ctx.emit(f"    d.pRootSignature = {use_resource(ctx, rs, register_as=('RootSignature', 'ID3D12RootSignature'))};")
-        _emit_shader_byte_code(ctx, cs_obj, "d.CS", "CS bytecode (stream PSO)")
+        _emit_shader_byte_code(ctx, cs_obj, "d.CS", "CS bytecode (stream PSO)",
+                               pso_rid_str=rid_str, stage="CS")
         _emit_pso_common_tail(ctx, desc, "d")
         ctx.emit(f"    HR(device->CreateComputePipelineState(&d, IID_PPV_ARGS(&{name})));")
         ctx.emit(f"  }}")
@@ -940,7 +980,9 @@ def emit_create_pipeline_state_stream(ctx: ExportContext, chunk) -> None:
     for stage_field, label in (("VS", "VS bytecode"), ("PS", "PS bytecode"),
                                 ("DS", "DS bytecode"), ("HS", "HS bytecode"),
                                 ("GS", "GS bytecode")):
-        _emit_shader_byte_code(ctx, sd_child(desc, stage_field), f"d.{stage_field}", label + " (stream PSO)")
+        _emit_shader_byte_code(ctx, sd_child(desc, stage_field), f"d.{stage_field}",
+                               label + " (stream PSO)",
+                               pso_rid_str=rid_str, stage=stage_field)
     _emit_blend_state(ctx, sd_child(desc, "BlendState"), "d.BlendState")
     sm = sd_uint(desc, "SampleMask", 0xFFFFFFFF)
     ctx.emit(f"    d.SampleMask = {sm}u;")
@@ -2623,13 +2665,52 @@ def _write_output(ctx: ExportContext) -> None:
             f.write(f"#{idx}\t{name}\n")
 
 
+_STAGE_ENUM_TO_FIELD = {
+    "Vertex": "VS",
+    "Hull": "HS",
+    "Domain": "DS",
+    "Geometry": "GS",
+    "Pixel": "PS",
+    "Compute": "CS",
+    "Amplification": "AS",
+    "Mesh": "MS",
+}
+
+
+def _write_shader_blob(ctx: ExportContext, raw: bytes) -> str:
+    """Hash ``raw``, write it to ``shaders/<md5>.cso`` (deduping), and return
+    the hash. Skips the disk write when ``ctx.write_blobs`` is off but still
+    returns the hash so the PSO emitter can reference it.
+    """
+    h = _lib.shader_bytecode_hash(raw)
+    if h in ctx.shader_blobs:
+        return h
+    ctx.shader_blobs[h] = raw
+    if ctx.write_blobs:
+        path = os.path.join(ctx.out_dir, "shaders", f"{h}.cso")
+        with open(path, "wb") as f:
+            f.write(raw)
+    return h
+
+
 def _extract_shader_blobs(controller, ctx: ExportContext) -> None:
-    """Walk every shader reflection in the capture, write its raw bytecode to
-    ``shaders/<md5>.cso``. PSOs in the emitted code reference shaders by hash.
+    """Walk every action in the capture, pull each bound shader's reflection,
+    write the raw bytecode to ``shaders/<md5>.cso``, and record both:
+
+      - ``ctx.shader_id_to_hash[shader_resource_id] = hash``
+      - ``ctx.pso_shader_hashes[(pso_resource_id, stage_field)] = hash``
+
+    The PSO emitter uses the second mapping to emit ``LoadBlob(...)`` calls
+    that reconstitute D3D12_SHADER_BYTECODE at replay.
+
+    Reflection rather than the structured file is used because RenderDoc
+    serialises ``D3D12_SHADER_BYTECODE.pShaderBytecode`` as an opaque buffer
+    that the Python-side SDFile view doesn't expose. The reflection path
+    does expose ``rawBytes``, and the (PSO_id, stage) -> shader_id binding
+    is recoverable from the live pipeline state at any draw/dispatch event.
     """
     if not ctx.write_blobs:
         return
-    seen: set = set()
     for action in _lib.walk_actions(controller):
         if not (
             int(action.flags) & (int(rd.ActionFlags.Drawcall) | int(rd.ActionFlags.Dispatch))
@@ -2640,7 +2721,22 @@ def _extract_shader_blobs(controller, ctx: ExportContext) -> None:
         except Exception:
             continue
         pipe = controller.GetPipelineState()
-        for stage in (
+        # Identify the PSO bound at this event. D3D12 exposes the wrapped
+        # pipeline state resource via D3D12Pipe::State.pipelineResourceId.
+        pso_rid_str: Optional[str] = None
+        try:
+            d3d12 = controller.GetD3D12PipelineState()
+        except Exception:
+            d3d12 = None
+        if d3d12 is not None:
+            try:
+                pso_rid = d3d12.pipelineResourceId
+                if pso_rid is not None and str(pso_rid) not in ("ResourceId()", "0"):
+                    pso_rid_str = str(pso_rid)
+            except Exception:
+                pass
+
+        for stage_enum in (
             rd.ShaderStage.Vertex,
             rd.ShaderStage.Hull,
             rd.ShaderStage.Domain,
@@ -2651,21 +2747,18 @@ def _extract_shader_blobs(controller, ctx: ExportContext) -> None:
             rd.ShaderStage.Mesh,
         ):
             try:
-                refl = pipe.GetShaderReflection(stage)
+                refl = pipe.GetShaderReflection(stage_enum)
             except Exception:
                 refl = None
             if refl is None or len(refl.rawBytes) == 0:
                 continue
             raw = bytes(refl.rawBytes)
-            h = _lib.shader_bytecode_hash(raw)
-            if h in seen:
-                continue
-            seen.add(h)
-            path = os.path.join(ctx.out_dir, "shaders", f"{h}.cso")
-            with open(path, "wb") as f:
-                f.write(raw)
-            ctx.shader_blobs[h] = raw
+            h = _write_shader_blob(ctx, raw)
             ctx.shader_id_to_hash[str(refl.resourceId)] = h
+            if pso_rid_str is not None:
+                stage_field = _STAGE_ENUM_TO_FIELD.get(_lib.shader_stage_name(stage_enum))
+                if stage_field is not None:
+                    ctx.pso_shader_hashes[(pso_rid_str, stage_field)] = h
 
 
 def export(
