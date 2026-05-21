@@ -44,6 +44,24 @@ rdcstr DoStringise(const RemapTexture &el)
   END_ENUM_STRINGISE();
 }
 
+template <>
+rdcstr DoStringise(const DescriptorWriteKind &el)
+{
+  BEGIN_ENUM_STRINGISE(DescriptorWriteKind);
+  {
+    STRINGISE_ENUM_CLASS(Unknown)
+    STRINGISE_ENUM_CLASS(CopyDescriptors)
+    STRINGISE_ENUM_CLASS(CopyDescriptorsSimple)
+    STRINGISE_ENUM_CLASS(CreateConstantBufferView)
+    STRINGISE_ENUM_CLASS(CreateShaderResourceView)
+    STRINGISE_ENUM_CLASS(CreateUnorderedAccessView)
+    STRINGISE_ENUM_CLASS(CreateRenderTargetView)
+    STRINGISE_ENUM_CLASS(CreateDepthStencilView)
+    STRINGISE_ENUM_CLASS(CreateSampler)
+  }
+  END_ENUM_STRINGISE();
+}
+
 template <typename SerialiserType>
 void DoSerialise(SerialiserType &ser, GetTextureDataParams &el)
 {

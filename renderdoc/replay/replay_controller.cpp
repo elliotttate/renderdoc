@@ -496,6 +496,163 @@ const rdcarray<DescriptorStoreDescription> &ReplayController::GetDescriptorStore
   return m_DescriptorStores;
 }
 
+namespace
+{
+struct DescriptorWriteChunkInfo
+{
+  const char *name;
+  DescriptorWriteKind kind;
+};
+
+// Names match the strings emitted by `D3D12Chunk` in the structured file.
+// Anything not on this list is treated as Unknown and skipped.
+static const DescriptorWriteChunkInfo kKnownDescriptorWriteChunks[] = {
+    {"ID3D12Device::CopyDescriptors", DescriptorWriteKind::CopyDescriptors},
+    {"ID3D12Device::CopyDescriptorsSimple", DescriptorWriteKind::CopyDescriptorsSimple},
+    {"ID3D12Device::CreateConstantBufferView", DescriptorWriteKind::CreateConstantBufferView},
+    {"ID3D12Device::CreateShaderResourceView", DescriptorWriteKind::CreateShaderResourceView},
+    {"ID3D12Device::CreateUnorderedAccessView", DescriptorWriteKind::CreateUnorderedAccessView},
+    {"ID3D12Device::CreateRenderTargetView", DescriptorWriteKind::CreateRenderTargetView},
+    {"ID3D12Device::CreateDepthStencilView", DescriptorWriteKind::CreateDepthStencilView},
+    {"ID3D12Device::CreateSampler", DescriptorWriteKind::CreateSampler},
+};
+
+static DescriptorWriteKind ClassifyDescriptorWriteChunk(const rdcstr &name)
+{
+  for(const DescriptorWriteChunkInfo &i : kKnownDescriptorWriteChunks)
+  {
+    if(name == i.name)
+      return i.kind;
+  }
+  return DescriptorWriteKind::Unknown;
+}
+
+// PortableHandle is serialised as { ResourceId heap; uint32_t index; } — recover
+// both fields if present.
+static bool ReadPortableHandle(const SDObject *obj, ResourceId &heap, uint32_t &slot)
+{
+  if(obj == NULL)
+    return false;
+  const SDObject *heapField = obj->FindChild("heap"_lit);
+  const SDObject *indexField = obj->FindChild("index"_lit);
+  if(heapField == NULL || indexField == NULL)
+    return false;
+  heap = heapField->AsResourceId();
+  slot = (uint32_t)indexField->AsUInt64();
+  return true;
+}
+
+// EmitCopyDescriptorsRecords / EmitCopyDescriptorsSimpleRecord:
+//
+// Both ID3D12Device::CopyDescriptors and CopyDescriptorsSimple serialise via
+// `Serialise_DynamicDescriptorCopies` which records a `DescriptorCopies` array
+// of DynamicDescriptorCopy{ type, dst (PortableHandle), src (PortableHandle) }.
+// The driver pre-expands a multi-range CopyDescriptors into individual copies
+// at capture time, so we can use the same decoder for both chunk kinds.
+static void EmitCopyDescriptorsRecords(const SDChunk *chunk, uint32_t chunkIndex,
+                                       DescriptorWriteKind kind,
+                                       rdcarray<DescriptorWriteRecord> &out)
+{
+  const SDObject *copies = chunk->FindChild("DescriptorCopies"_lit);
+  if(copies == NULL)
+    return;
+
+  for(size_t i = 0; i < copies->NumChildren(); i++)
+  {
+    const SDObject *copy = copies->GetChild(i);
+    if(copy == NULL)
+      continue;
+    ResourceId dstHeap, srcHeap;
+    uint32_t dstSlot = 0, srcSlot = 0;
+    if(!ReadPortableHandle(copy->FindChild("dst"_lit), dstHeap, dstSlot))
+      continue;
+    if(!ReadPortableHandle(copy->FindChild("src"_lit), srcHeap, srcSlot))
+      continue;
+
+    DescriptorWriteRecord rec;
+    rec.kind = kind;
+    rec.chunkIndex = chunkIndex;
+    rec.chunkOffset = (uint32_t)i;
+    rec.timestampMicro = chunk->metadata.timestampMicro;
+    rec.threadID = chunk->metadata.threadID;
+    rec.destHeap = dstHeap;
+    rec.destSlot = dstSlot;
+    rec.srcHeap = srcHeap;
+    rec.srcSlot = srcSlot;
+    out.push_back(rec);
+  }
+}
+
+// Create*View chunks all use Serialise_DynamicDescriptorWrite which records
+// `desc` (D3D12Descriptor with type, heap, index, Resource for SRV/RTV/DSV/UAV)
+// + `dst` (PortableHandle). The destination is in `dst`; for view-target
+// resources we read `desc.Resource` when present.
+static void EmitCreateViewRecord(const SDChunk *chunk, uint32_t chunkIndex,
+                                 DescriptorWriteKind kind,
+                                 rdcarray<DescriptorWriteRecord> &out)
+{
+  ResourceId dstHeap;
+  uint32_t dstSlot = 0;
+  if(!ReadPortableHandle(chunk->FindChild("dst"_lit), dstHeap, dstSlot))
+    return;
+
+  DescriptorWriteRecord rec;
+  rec.kind = kind;
+  rec.chunkIndex = chunkIndex;
+  rec.chunkOffset = 0;
+  rec.timestampMicro = chunk->metadata.timestampMicro;
+  rec.threadID = chunk->metadata.threadID;
+  rec.destHeap = dstHeap;
+  rec.destSlot = dstSlot;
+
+  if(const SDObject *desc = chunk->FindChild("desc"_lit))
+  {
+    if(const SDObject *res = desc->FindChild("Resource"_lit))
+    {
+      if(res->IsResource())
+        rec.resource = res->AsResourceId();
+    }
+  }
+  out.push_back(rec);
+}
+}    // namespace
+
+rdcarray<DescriptorWriteRecord> ReplayController::GetDescriptorWrites()
+{
+  CHECK_REPLAY_THREAD();
+
+  rdcarray<DescriptorWriteRecord> out;
+
+  const SDFile &sdfile = *m_pDevice->GetStructuredFile();
+  for(uint32_t i = 0; i < sdfile.chunks.size(); i++)
+  {
+    const SDChunk *chunk = sdfile.chunks[i];
+    DescriptorWriteKind kind = ClassifyDescriptorWriteChunk(chunk->name);
+    if(kind == DescriptorWriteKind::Unknown)
+      continue;
+
+    switch(kind)
+    {
+      case DescriptorWriteKind::CopyDescriptors:
+      case DescriptorWriteKind::CopyDescriptorsSimple:
+        EmitCopyDescriptorsRecords(chunk, i, kind, out);
+        break;
+      case DescriptorWriteKind::CreateConstantBufferView:
+      case DescriptorWriteKind::CreateShaderResourceView:
+      case DescriptorWriteKind::CreateUnorderedAccessView:
+      case DescriptorWriteKind::CreateRenderTargetView:
+      case DescriptorWriteKind::CreateDepthStencilView:
+      case DescriptorWriteKind::CreateSampler:
+        EmitCreateViewRecord(chunk, i, kind, out);
+        break;
+      default:
+        break;
+    }
+  }
+
+  return out;
+}
+
 const rdcarray<TextureDescription> &ReplayController::GetTextures()
 {
   CHECK_REPLAY_THREAD();
@@ -566,7 +723,60 @@ bytebuf ReplayController::GetBufferData(ResourceId buff, uint64_t offset, uint64
   m_pDevice->GetBufferData(buff, offset, len, retData);
   FatalErrorCheck();
 
+  ApplyBufferOverrides(buff, offset, retData);
+
   return retData;
+}
+
+void ReplayController::ApplyBufferOverrides(ResourceId buf, uint64_t offset, bytebuf &data)
+{
+  if(data.isEmpty())
+    return;
+
+  auto it = m_BufferOverrides.find(buf);
+  if(it == m_BufferOverrides.end())
+    return;
+
+  // Each patch is interpreted in its absolute buffer coordinates. We splice it
+  // into the requested window if they overlap.
+  uint64_t windowStart = offset;
+  uint64_t windowEnd = offset + (uint64_t)data.size();
+
+  for(const BufferOverridePatch &patch : it->second)
+  {
+    uint64_t patchStart = patch.offset;
+    uint64_t patchEnd = patch.offset + (uint64_t)patch.data.size();
+
+    uint64_t lo = patchStart > windowStart ? patchStart : windowStart;
+    uint64_t hi = patchEnd < windowEnd ? patchEnd : windowEnd;
+    if(hi <= lo)
+      continue;
+
+    size_t dstOff = (size_t)(lo - windowStart);
+    size_t srcOff = (size_t)(lo - patchStart);
+    size_t copyLen = (size_t)(hi - lo);
+    memcpy(data.data() + dstOff, patch.data.data() + srcOff, copyLen);
+  }
+}
+
+void ReplayController::SetBufferOverride(ResourceId buffer, uint64_t offset, const bytebuf &data)
+{
+  CHECK_REPLAY_THREAD();
+
+  if(buffer == ResourceId() || data.isEmpty())
+    return;
+
+  BufferOverridePatch patch;
+  patch.offset = offset;
+  patch.data = data;
+  m_BufferOverrides[buffer].push_back(std::move(patch));
+}
+
+void ReplayController::ClearBufferOverride(ResourceId buffer)
+{
+  CHECK_REPLAY_THREAD();
+
+  m_BufferOverrides.erase(buffer);
 }
 
 bytebuf ReplayController::GetTextureData(ResourceId tex, const Subresource &sub)
@@ -1740,6 +1950,7 @@ rdcarray<ShaderVariable> ReplayController::GetCBufferVariableContents(
       if(length > 0)
         m_pDevice->GetBufferData(buffer, offset, length, data);
       FatalErrorCheck();
+      ApplyBufferOverrides(buffer, offset, data);
     }
   }
 

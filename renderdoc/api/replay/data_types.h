@@ -733,6 +733,166 @@ descriptor. Descriptors are assumed to be tightly packed so stride is equal to s
 
 DECLARE_REFLECTION_STRUCT(DescriptorStoreDescription);
 
+DOCUMENT(R"(The kind of descriptor write recorded in a :class:`DescriptorWriteRecord`.
+
+.. data:: Unknown
+
+  The chunk does not match a known descriptor mutation.
+
+.. data:: CopyDescriptors
+
+  An ``ID3D12Device::CopyDescriptors`` call (potentially multi-range).
+
+.. data:: CopyDescriptorsSimple
+
+  An ``ID3D12Device::CopyDescriptorsSimple`` call (single dst+src pair).
+
+.. data:: CreateConstantBufferView
+
+  An ``ID3D12Device::CreateConstantBufferView`` call writing a single CBV.
+
+.. data:: CreateShaderResourceView
+
+  An ``ID3D12Device::CreateShaderResourceView`` call writing a single SRV.
+
+.. data:: CreateUnorderedAccessView
+
+  An ``ID3D12Device::CreateUnorderedAccessView`` call writing a single UAV.
+
+.. data:: CreateRenderTargetView
+
+  An ``ID3D12Device::CreateRenderTargetView`` call writing a single RTV.
+
+.. data:: CreateDepthStencilView
+
+  An ``ID3D12Device::CreateDepthStencilView`` call writing a single DSV.
+
+.. data:: CreateSampler
+
+  An ``ID3D12Device::CreateSampler`` call writing a single sampler.
+)");
+enum class DescriptorWriteKind : uint32_t
+{
+  Unknown = 0,
+  CopyDescriptors,
+  CopyDescriptorsSimple,
+  CreateConstantBufferView,
+  CreateShaderResourceView,
+  CreateUnorderedAccessView,
+  CreateRenderTargetView,
+  CreateDepthStencilView,
+  CreateSampler,
+};
+
+DECLARE_REFLECTION_ENUM(DescriptorWriteKind);
+
+DOCUMENT(R"(A normalized record of one descriptor heap mutation recorded in the capture.
+
+This is the driver-resolved replacement for the chunk-level walk in
+``util/automation/d3d12_copy_descriptors.py``: every D3D12 descriptor mutation
+(``CopyDescriptors``, ``CopyDescriptorsSimple``, ``CreateConstantBufferView``,
+``CreateShaderResourceView``, ``CreateUnorderedAccessView``,
+``CreateRenderTargetView``, ``CreateDepthStencilView``, ``CreateSampler``) is
+returned as one or more records with the destination resolved to a
+``(heap, slot)`` pair via the wrapped descriptor's ``PortableHandle``.
+
+For ``CopyDescriptors[Simple]`` records the source ``(heap, slot)`` is also
+populated. For ``Create*View`` records the optional ``resource`` field is the
+view target resource, if any.
+
+A single chunk may produce multiple records: a ``CopyDescriptors`` call with
+``N`` destination slots emits ``N`` records, one per copied descriptor, so each
+record always refers to exactly one descriptor slot. ``chunkIndex`` is the
+shared chunk index; ``chunkOffset`` is which slot inside that chunk the record
+represents.
+)");
+struct DescriptorWriteRecord
+{
+  DOCUMENT("");
+  DescriptorWriteRecord() = default;
+  DescriptorWriteRecord(const DescriptorWriteRecord &) = default;
+  DescriptorWriteRecord &operator=(const DescriptorWriteRecord &) = default;
+
+  bool operator==(const DescriptorWriteRecord &o) const
+  {
+    return kind == o.kind && chunkIndex == o.chunkIndex && chunkOffset == o.chunkOffset;
+  }
+  bool operator<(const DescriptorWriteRecord &o) const
+  {
+    if(chunkIndex != o.chunkIndex)
+      return chunkIndex < o.chunkIndex;
+    if(chunkOffset != o.chunkOffset)
+      return chunkOffset < o.chunkOffset;
+    return (int)kind < (int)o.kind;
+  }
+
+  DOCUMENT(R"(The kind of descriptor mutation.
+
+:type: DescriptorWriteKind
+)");
+  DescriptorWriteKind kind = DescriptorWriteKind::Unknown;
+
+  DOCUMENT(R"(The index of the chunk in the structured file. Multiple records may share a chunk if
+the chunk recorded a multi-slot copy.
+
+:type: int
+)");
+  uint32_t chunkIndex = 0;
+
+  DOCUMENT(R"(For multi-slot chunks (``CopyDescriptors``), the slot offset inside the chunk this
+record represents. Always 0 for single-slot mutations.
+
+:type: int
+)");
+  uint32_t chunkOffset = 0;
+
+  DOCUMENT(R"(Microsecond-resolution timestamp from the structured chunk metadata.
+
+:type: int
+)");
+  uint64_t timestampMicro = 0;
+
+  DOCUMENT(R"(The OS thread that issued the call.
+
+:type: int
+)");
+  uint64_t threadID = 0;
+
+  DOCUMENT(R"(The destination descriptor heap.
+
+:type: ResourceId
+)");
+  ResourceId destHeap;
+
+  DOCUMENT(R"(The destination slot index within ``destHeap``.
+
+:type: int
+)");
+  uint32_t destSlot = 0;
+
+  DOCUMENT(R"(For ``CopyDescriptors[Simple]`` mutations, the source descriptor heap.
+
+For ``Create*View`` mutations this is empty.
+
+:type: ResourceId
+)");
+  ResourceId srcHeap;
+
+  DOCUMENT(R"(For ``CopyDescriptors[Simple]`` mutations, the source slot index within ``srcHeap``.
+
+:type: int
+)");
+  uint32_t srcSlot = 0;
+
+  DOCUMENT(R"(For ``Create*View`` mutations the view target resource, if recoverable.
+
+:type: ResourceId
+)");
+  ResourceId resource;
+};
+
+DECLARE_REFLECTION_STRUCT(DescriptorWriteRecord);
+
 DOCUMENT("A description of a buffer resource.");
 struct BufferDescription
 {

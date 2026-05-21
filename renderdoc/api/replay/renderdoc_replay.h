@@ -841,6 +841,59 @@ are only used as intermediary elements.
 )");
   virtual const rdcarray<DescriptorStoreDescription> &GetDescriptorStores() = 0;
 
+  DOCUMENT(R"(Inject an override byte range for a buffer at replay time.
+
+The override is layered on top of the buffer's recorded contents whenever the
+controller serves bytes for that resource via :meth:`GetBufferData` or
+:meth:`GetCBufferVariableContents`, so any tooling that reads the buffer (the
+shader debugger, ``util/automation/cbv_tools``, etc.) sees the patched values.
+
+Multiple overrides may be applied to the same buffer; they accumulate in the
+order they were set and a later override of the same byte range supersedes an
+earlier one. Use :meth:`ClearBufferOverride` to drop them.
+
+.. note::
+
+  This *does not* modify the buffer's GPU storage. Drawcalls that read the
+  buffer through bound CBVs continue to see the unmodified bytes during real
+  GPU replay. The override changes what RenderDoc's analysis surfaces (and,
+  importantly, what the shader debugger sees when stepping through a shader
+  that reads the CBV), but not what the GPU itself reads. For a true
+  GPU-side override, combine this with a :meth:`ReplaceResource` shader swap
+  that rewrites the consuming shader to read the patched bytes.
+
+:param ResourceId buffer: The buffer to override.
+:param int offset: The byte offset within the buffer to start overriding.
+:param bytes data: The replacement bytes.
+)");
+  virtual void SetBufferOverride(ResourceId buffer, uint64_t offset, const bytebuf &data) = 0;
+
+  DOCUMENT(R"(Remove all overrides previously set on a buffer with :meth:`SetBufferOverride`.
+
+:param ResourceId buffer: The buffer whose overrides should be cleared.
+)");
+  virtual void ClearBufferOverride(ResourceId buffer) = 0;
+
+  DOCUMENT(R"(Walk the structured file and return a normalized record for every D3D12
+descriptor heap mutation observed during the recorded frame.
+
+This is the driver-side equivalent of
+``util/automation/d3d12_copy_descriptors.py`` — every chunk that mutates a
+descriptor heap (``CopyDescriptors``, ``CopyDescriptorsSimple``,
+``CreateConstantBufferView``, ``CreateShaderResourceView``,
+``CreateUnorderedAccessView``, ``CreateRenderTargetView``,
+``CreateDepthStencilView``, ``CreateSampler``) is decoded into one
+:class:`DescriptorWriteRecord` per affected slot, with destination (and where
+applicable, source) handles already resolved to ``(heap, slot)`` via the
+``PortableHandle`` form serialised in the chunk.
+
+For non-D3D12 captures this currently returns an empty array.
+
+:return: The chronological descriptor write log.
+:rtype: List[DescriptorWriteRecord]
+)");
+  virtual rdcarray<DescriptorWriteRecord> GetDescriptorWrites() = 0;
+
   DOCUMENT(R"(Retrieve a list of any newly generated diagnostic messages.
 
 Every time this function is called, any debug messages returned will not be returned again. Only

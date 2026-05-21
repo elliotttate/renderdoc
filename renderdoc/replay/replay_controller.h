@@ -25,7 +25,9 @@
 
 #pragma once
 
+#include <map>
 #include <set>
+#include <vector>
 #include "api/replay/renderdoc_replay.h"
 #include "common/common.h"
 #include "core/core.h"
@@ -191,6 +193,9 @@ public:
   const rdcarray<TextureDescription> &GetTextures();
   const rdcarray<BufferDescription> &GetBuffers();
   const rdcarray<DescriptorStoreDescription> &GetDescriptorStores();
+  rdcarray<DescriptorWriteRecord> GetDescriptorWrites();
+  void SetBufferOverride(ResourceId buffer, uint64_t offset, const bytebuf &data);
+  void ClearBufferOverride(ResourceId buffer);
   const rdcarray<ResourceDescription> &GetResources();
   rdcarray<DebugMessage> GetDebugMessages();
   ResultDetails GetFatalErrorStatus()
@@ -297,6 +302,18 @@ private:
 
   std::set<ResourceId> m_TargetResources;
   std::set<ResourceId> m_CustomShaders;
+
+  // Buffer byte overrides applied to GetBufferData / GetCBufferVariableContents
+  // results so analysis tools (and the shader debugger) see patched values
+  // without modifying the captured GPU storage.
+  struct BufferOverridePatch
+  {
+    uint64_t offset;
+    bytebuf data;
+  };
+  std::map<ResourceId, std::vector<BufferOverridePatch>> m_BufferOverrides;
+
+  void ApplyBufferOverrides(ResourceId buf, uint64_t offset, bytebuf &data);
 
   friend struct ReplayOutput;
 };

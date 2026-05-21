@@ -492,6 +492,21 @@ void DoSerialise(SerialiserType &ser, DescriptorStoreDescription &el)
 }
 
 template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, DescriptorWriteRecord &el)
+{
+  SERIALISE_MEMBER(kind);
+  SERIALISE_MEMBER(chunkIndex);
+  SERIALISE_MEMBER(chunkOffset);
+  SERIALISE_MEMBER(timestampMicro);
+  SERIALISE_MEMBER(threadID);
+  SERIALISE_MEMBER(destHeap);
+  SERIALISE_MEMBER(destSlot);
+  SERIALISE_MEMBER(srcHeap);
+  SERIALISE_MEMBER(srcSlot);
+  SERIALISE_MEMBER(resource);
+}
+
+template <typename SerialiserType>
 void DoSerialise(SerialiserType &ser, APIProperties &el)
 {
   SERIALISE_MEMBER(pipelineType);
@@ -2358,6 +2373,7 @@ INSTANTIATE_SERIALISE_TYPE(ResourceDescription)
 INSTANTIATE_SERIALISE_TYPE(TextureDescription)
 INSTANTIATE_SERIALISE_TYPE(BufferDescription)
 INSTANTIATE_SERIALISE_TYPE(DescriptorStoreDescription)
+INSTANTIATE_SERIALISE_TYPE(DescriptorWriteRecord)
 INSTANTIATE_SERIALISE_TYPE(APIProperties)
 INSTANTIATE_SERIALISE_TYPE(DriverInformation)
 INSTANTIATE_SERIALISE_TYPE(DebugMessage)
