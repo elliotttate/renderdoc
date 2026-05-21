@@ -35,6 +35,7 @@ without depending on Nsight, generated C++ captures, or ad-hoc scripts.
 | `perf_counters` | Nsight Range Profiler | Per-event GPU counters via `FetchCounters` |
 | `cbv_decode` | Nsight CBV Decoder | Decode CBVs into named struct fields via `GetCBufferVariableContents` + pairwise field diff |
 | `compare_eyes` | end-to-end | Pair events, run event_diff + image_diff + geometry_diff (+ optional shader_debug) on each, rank by divergence |
+| `export_cpp` | Nsight "Generate C++ Capture" | Walk the SDFile and emit a buildable C++ project (`main.cpp`, `capture_frame.cpp`, `CMakeLists.txt`, `shaders/<hash>.cso`) that reproduces the D3D12 call sequence. Covers device/list/queue chunks; stubs anything that needs CPU/GPU descriptor handle tracking |
 
 The same functionality is exposed by the C++ subcommands in `renderdoccmd`:
 `renderdoccmd index-capture`, `renderdoccmd state-at-event`, etc.
@@ -57,7 +58,41 @@ python -m util.automation.state_at_event C:\captures\sn2.rdc --event 16042
 python -m util.automation.eye_classifier  C:\captures\sn2.rdc --out C:\captures\sn2.eye.json
 python -m util.automation.capture_diff    C:\captures\before.index C:\captures\after.index --out diff.json
 python -m util.automation.explain_pixel   C:\captures\sn2.rdc --x 900 --y 250 --probe
+
+# C++ code export (Nsight-style "Generate C++ Capture")
+python -m util.automation.export_cpp      C:\captures\sn2.rdc --out C:\captures\sn2_cpp
 ```
+
+### export_cpp
+
+Generates a buildable C++ project from a `.rdc` capture::
+
+    <out_dir>/
+        main.cpp              # creates an ID3D12Device and calls RecordCapture()
+        capture_frame.cpp     # the recorded D3D12 call sequence
+        capture_frame.h       # shared declarations
+        CMakeLists.txt
+        README.md
+        shaders/<hash>.cso    # extracted shader bytecode
+        unhandled.txt         # one line per chunk the exporter didn't handle
+
+What's covered: every common D3D12 chunk that participates in the per-frame
+draw/dispatch flow — device creation (CommandQueue, Allocator, List,
+DescriptorHeap, RootSignature, PSOs, CommittedResource/Heap/Fence), command
+list recording (set state, draws, dispatches, clears, copies, resolve,
+discard, ExecuteIndirect, DispatchMesh, DispatchRays, marker), and queue
+execution (ExecuteCommandLists, Signal, Wait). Mesh shader (`DispatchMesh`),
+VRS (`RSSetShadingRate`), and depth bounds (`OMSetDepthBounds`) are all
+covered via `QueryInterface`.
+
+What's stubbed: anything that requires CPU/GPU descriptor handle tracking
+(view creation calls, `Set{Graphics,Compute}RootDescriptorTable`,
+`OMSetRenderTargets`, `Clear{RenderTarget,DepthStencil}View`), nested-struct
+reconstruction (`ResourceBarrier` array, `CopyTextureRegion`), pipeline
+state stream PSOs, ray tracing dispatches, and root signature blob loading.
+Each stub is a `/* TODO ... */` comment so the output still compiles
+structurally. The full list of stubbed chunks for any given capture is in
+`unhandled.txt`.
 
 ## Output schema (summary)
 
