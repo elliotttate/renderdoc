@@ -11,8 +11,6 @@ Usage:
     python -m util.automation.nonblocking <capture.rdc> --json    # JSON
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

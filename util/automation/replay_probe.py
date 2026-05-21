@@ -42,8 +42,6 @@ cycle so the workflow can be scripted as::
         delta = s.compare_roi(roi_before, roi_after)
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

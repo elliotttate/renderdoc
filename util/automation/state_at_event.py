@@ -4,8 +4,6 @@ Usage:
     python -m util.automation.state_at_event <capture.rdc> --event <eid>
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

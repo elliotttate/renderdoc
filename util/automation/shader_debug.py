@@ -18,8 +18,6 @@ Usage:
     python -m util.automation.shader_debug compare <cap.rdc> --left 16042 --right 16678 --x 100 --y 50
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

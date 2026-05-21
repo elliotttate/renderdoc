@@ -66,8 +66,6 @@ If your UEVR run dropped JSONL instead of JSON for the larger files, this
 module reads both transparently.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

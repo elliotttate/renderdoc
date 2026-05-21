@@ -10,8 +10,6 @@ Usage:
     python -m util.automation.rdg_classifier <capture.rdc> [--config <classes.json>] [--out <file>]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

@@ -13,8 +13,6 @@ Usage:
     python -m util.automation.event_diff <capture.rdc> --a 16042 --b 16678
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

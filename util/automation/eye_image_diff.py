@@ -10,8 +10,6 @@ Usage:
     python -m util.automation.eye_image_diff <cap.rdc> --a 16042 --b 16678 [--out-dir dir]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

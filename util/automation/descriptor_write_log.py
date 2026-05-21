@@ -53,8 +53,6 @@ Usage::
     python -m util.automation.descriptor_write_log <cap.rdc> [--out file]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

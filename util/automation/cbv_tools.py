@@ -9,8 +9,6 @@ Usage:
     python -m util.automation.cbv_tools diff <capture.rdc> --eventA <a> --eventB <b> --slot 0
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

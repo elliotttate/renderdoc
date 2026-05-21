@@ -8,8 +8,6 @@ Usage:
     python -m util.automation.pixel_lineage <capture.rdc> --x 900 --y 250 [--event <eid>]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

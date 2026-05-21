@@ -17,8 +17,6 @@ Config keys (all optional):
   swap_eyes        bool — flip left/right
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

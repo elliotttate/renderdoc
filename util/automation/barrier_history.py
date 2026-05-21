@@ -12,8 +12,6 @@ Usage:
     python -m util.automation.barrier_history <cap.rdc> [--for-resource <ref>] [--out file]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

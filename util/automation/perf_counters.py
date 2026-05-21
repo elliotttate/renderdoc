@@ -10,8 +10,6 @@ Usage:
     python -m util.automation.perf_counters <cap.rdc> [--counters EventGPUDuration,ALU,RasterizedPrimitives] [--out file]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

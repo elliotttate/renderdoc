@@ -19,8 +19,6 @@ Usage:
     python -m util.automation.d3d12_copy_descriptors <cap.rdc> [--out file]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

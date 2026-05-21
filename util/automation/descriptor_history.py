@@ -26,8 +26,6 @@ Usage:
     python -m util.automation.descriptor_history <capture.rdc> [--slots-from-bindings] [--out file]
 """
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json

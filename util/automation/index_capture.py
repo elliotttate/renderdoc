@@ -10,8 +10,6 @@ Or if Python doesn't have the package on path:
     python util/automation/index_capture.py <capture.rdc> --out <dir>
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

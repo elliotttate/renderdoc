@@ -31,8 +31,6 @@ Usage:
     python -m util.automation.launch_profile validate <profile.json>
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

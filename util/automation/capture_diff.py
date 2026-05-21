@@ -13,8 +13,6 @@ Usage:
     python -m util.automation.capture_diff <before.index> <after.index> [--out diff.json]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

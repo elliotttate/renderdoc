@@ -15,8 +15,6 @@ Usage example:
     python -m util.automation.sn2_workflows pso-events <cap.rdc> --shader-hash 166dba88
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

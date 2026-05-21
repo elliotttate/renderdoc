@@ -25,8 +25,6 @@ Usage:
     python -m util.automation.automation_server --host 127.0.0.1 --port 7745
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

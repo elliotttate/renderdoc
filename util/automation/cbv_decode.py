@@ -15,8 +15,6 @@ Usage:
     python -m util.automation.cbv_decode pair <cap.rdc> --left 16042 --right 16678 --cbuf View
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

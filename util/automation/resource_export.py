@@ -9,8 +9,6 @@ Usage:
     python -m util.automation.resource_export <capture.rdc> --resource <ref> --event <eid> [--out <path>] [--stats]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import math

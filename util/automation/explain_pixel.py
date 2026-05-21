@@ -14,8 +14,6 @@ Usage:
     python -m util.automation.explain_pixel <capture.rdc> --x 900 --y 250 [--index <dir>] [--uevr-dir <dir>] [--probe]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

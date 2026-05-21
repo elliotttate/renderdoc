@@ -8,8 +8,6 @@ Usage:
     python -m util.automation.resource_lineage <capture.rdc> --resource <ResourceId|name> [--before <eid>]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

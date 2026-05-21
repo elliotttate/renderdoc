@@ -10,8 +10,6 @@ Usage:
     python -m util.automation.geometry_diff compare <cap.rdc> --left 16042 --right 16678 --stage VSOut
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

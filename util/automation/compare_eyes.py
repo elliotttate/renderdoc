@@ -11,8 +11,6 @@ Usage:
     python -m util.automation.compare_eyes <cap.rdc> [--max-pairs 25] [--probe-shader-debug] [--out file]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

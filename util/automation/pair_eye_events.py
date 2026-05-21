@@ -16,8 +16,6 @@ Usage:
     python -m util.automation.pair_eye_events <capture.rdc> [--out pairs.jsonl] [--config eye.json]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os
