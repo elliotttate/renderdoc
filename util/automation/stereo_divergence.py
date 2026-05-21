@@ -199,8 +199,12 @@ def rank(capture_path: str, top_n: int = 10) -> Dict[str, Any]:
         cb0_hashes: Dict[int, str] = {}
         candidate_eids = set()
         for p in pairs:
-            candidate_eids.add(int(p["left"]["eventId"]))
-            candidate_eids.add(int(p["right"]["eventId"]))
+            # pair_eye_events returns {"left": <int eid>, "right": <int eid>, ...}
+            # — handle both the int shape and a (legacy) {"eventId": ...} dict shape.
+            l = p["left"]
+            r = p["right"]
+            candidate_eids.add(int(l["eventId"]) if isinstance(l, dict) else int(l))
+            candidate_eids.add(int(r["eventId"]) if isinstance(r, dict) else int(r))
         for eid in sorted(candidate_eids):
             try:
                 controller.SetFrameEvent(eid, True)
@@ -226,8 +230,9 @@ def rank(capture_path: str, top_n: int = 10) -> Dict[str, Any]:
         # Score every pair
         scored = []
         for p in pairs:
-            left_eid = int(p["left"]["eventId"])
-            right_eid = int(p["right"]["eventId"])
+            l = p["left"]; r = p["right"]
+            left_eid = int(l["eventId"]) if isinstance(l, dict) else int(l)
+            right_eid = int(r["eventId"]) if isinstance(r, dict) else int(r)
 
             try:
                 result = _score_pair(controller, left_eid, right_eid, cb0_hashes)
