@@ -132,11 +132,18 @@ def classify(capture_path: str) -> Dict[str, Any]:
                 "confidence": 0.8 if eye != "unknown" else 0.0,
             })
 
+        # `fullSize` is included for compatibility with pair_eye_events and
+        # other downstream tools that expect the viewport-classifier shape.
+        # We re-use the existing _infer_main_rt heuristic to populate it.
+        from automation import eye_classifier as ec  # type: ignore
+        textures_by_id = {str(t.resourceId): t for t in controller.GetTextures()}
+        full_w, full_h = ec._infer_main_rt(controller, textures_by_id)
         return {
             "capture": capture_path,
             "main_rt": main_rt,
             "boundaries": boundaries,
             "perEyeCounts": per_eye,
+            "fullSize": [full_w, full_h],
             "events": rows,
             "mode": "temporal-clear-boundary",
         }
