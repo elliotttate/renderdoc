@@ -225,6 +225,31 @@ def sd_enum_str(obj, name: str, default: str = "") -> str:
             return default
 
 
+def sd_byte_array(obj) -> Optional[bytes]:
+    """Extract bytes from a structured byte array (each child a UINT8 value).
+
+    Returns ``None`` if ``obj`` is missing or contains no children.
+    Designed for ``SERIALISE_MEMBER_ARRAY`` fields like
+    ``pBlobWithRootSignature`` (root sig blob) and ``pShaderBytecode``
+    (PSO shader subobject body).
+    """
+    if obj is None:
+        return None
+    try:
+        n = obj.NumChildren()
+    except Exception:
+        return None
+    if n == 0:
+        return None
+    out = bytearray(n)
+    for i in range(n):
+        try:
+            out[i] = int(obj.GetChild(i).AsInt()) & 0xFF
+        except Exception:
+            out[i] = 0
+    return bytes(out)
+
+
 def read_portable_handle(obj) -> Optional[Tuple[Any, int]]:
     """Return ``(heap_ResourceId, slot)`` from a PortableHandle SDObject, or
     ``None`` if ``obj`` isn't a PortableHandle.
@@ -626,15 +651,171 @@ def emit_create_root_signature(ctx: ExportContext, chunk) -> None:
         return
     name = declare_resource(ctx, rid, "RootSignature", "ID3D12RootSignature")
     node_mask = sd_uint(chunk, "nodeMask", 0)
-    blob = sd_child(chunk, "pBlobWithRootSignature")
+    blob_obj = sd_child(chunk, "pBlobWithRootSignature")
+    blob_bytes = sd_byte_array(blob_obj) if ctx.write_blobs else None
+    if blob_bytes:
+        digest = hashlib.md5(blob_bytes).hexdigest()
+        path = os.path.join(ctx.out_dir, "blobs", f"rs_{digest}.bin")
+        with open(path, "wb") as f:
+            f.write(blob_bytes)
+        ctx.buffer_blobs[f"rs_{digest}"] = blob_bytes
+        ctx.emit(f"  {{")
+        ctx.emit(f"    auto blob = LoadBlob(\"blobs/rs_{digest}.bin\");")
+        ctx.emit(
+            f"    HR(device->CreateRootSignature({node_mask}, blob.data(), blob.size(), "
+            f"IID_PPV_ARGS(&{name})));"
+        )
+        ctx.emit(f"  }}")
+        return
     blob_size = sd_uint(chunk, "blobLengthInBytes", 0)
-    # We cannot reconstitute the blob from the chunk without raw bytes. Emit a
-    # placeholder + comment so the user can wire up an external .cso/.bin.
-    placeholder = f"/* TODO: load {blob_size}-byte serialized root signature blob */"
     ctx.emit(
-        f"  HR(device->CreateRootSignature({node_mask}, /* pBlob */ nullptr {placeholder},"
-        f" {blob_size}, IID_PPV_ARGS(&{name})));"
+        f"  /* TODO: provide {blob_size}-byte serialized root signature blob */"
     )
+    ctx.emit(
+        f"  HR(device->CreateRootSignature({node_mask}, nullptr, {blob_size}, "
+        f"IID_PPV_ARGS(&{name})));"
+    )
+
+
+def _emit_blend_state(ctx, obj, var: str, indent: str = "    ") -> None:
+    """Populate D3D12_BLEND_DESC at ``var``."""
+    if obj is None:
+        return
+    ctx.emit(f"{indent}{var}.AlphaToCoverageEnable = {1 if sd_value(sd_child(obj, 'AlphaToCoverageEnable')) else 0};")
+    ctx.emit(f"{indent}{var}.IndependentBlendEnable = {1 if sd_value(sd_child(obj, 'IndependentBlendEnable')) else 0};")
+    rts = sd_child(obj, "RenderTarget")
+    if rts is not None:
+        for i in range(min(rts.NumChildren(), 8)):
+            rt = rts.GetChild(i)
+            be = 1 if sd_value(sd_child(rt, "BlendEnable")) else 0
+            lo = 1 if sd_value(sd_child(rt, "LogicOpEnable")) else 0
+            srcb = sd_enum_str(rt, "SrcBlend", "D3D12_BLEND_ONE")
+            dstb = sd_enum_str(rt, "DestBlend", "D3D12_BLEND_ZERO")
+            opb = sd_enum_str(rt, "BlendOp", "D3D12_BLEND_OP_ADD")
+            srca = sd_enum_str(rt, "SrcBlendAlpha", "D3D12_BLEND_ONE")
+            dsta = sd_enum_str(rt, "DestBlendAlpha", "D3D12_BLEND_ZERO")
+            opa = sd_enum_str(rt, "BlendOpAlpha", "D3D12_BLEND_OP_ADD")
+            logo = sd_enum_str(rt, "LogicOp", "D3D12_LOGIC_OP_NOOP")
+            mask = sd_uint(rt, "RenderTargetWriteMask", 0xF)
+            ctx.emit(f"{indent}{var}.RenderTarget[{i}] = D3D12_RENDER_TARGET_BLEND_DESC{{ "
+                     f"{be}, {lo}, {enum_token(srcb)}, {enum_token(dstb)}, {enum_token(opb)}, "
+                     f"{enum_token(srca)}, {enum_token(dsta)}, {enum_token(opa)}, "
+                     f"{enum_token(logo)}, (UINT8){mask} }};")
+
+
+def _emit_rasterizer(ctx, obj, var: str, indent: str = "    ") -> None:
+    if obj is None:
+        return
+    _emit_assigns(ctx, indent, var, obj, [
+        ("FillMode", "enum", "D3D12_FILL_MODE_SOLID"),
+        ("CullMode", "enum", "D3D12_CULL_MODE_BACK"),
+    ])
+    fcc = 1 if sd_value(sd_child(obj, "FrontCounterClockwise")) else 0
+    ctx.emit(f"{indent}{var}.FrontCounterClockwise = {fcc};")
+    _emit_assigns(ctx, indent, var, obj, [
+        ("DepthBias", "int"),
+        ("DepthBiasClamp", "float"),
+        ("SlopeScaledDepthBias", "float"),
+    ])
+    de = 1 if sd_value(sd_child(obj, "DepthClipEnable")) else 0
+    me = 1 if sd_value(sd_child(obj, "MultisampleEnable")) else 0
+    aae = 1 if sd_value(sd_child(obj, "AntialiasedLineEnable")) else 0
+    ctx.emit(f"{indent}{var}.DepthClipEnable = {de};")
+    ctx.emit(f"{indent}{var}.MultisampleEnable = {me};")
+    ctx.emit(f"{indent}{var}.AntialiasedLineEnable = {aae};")
+    fsc = sd_uint(obj, "ForcedSampleCount", 0)
+    ctx.emit(f"{indent}{var}.ForcedSampleCount = {fsc}u;")
+    crm = sd_enum_str(obj, "ConservativeRaster", "D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF")
+    ctx.emit(f"{indent}{var}.ConservativeRaster = {enum_token(crm)};")
+
+
+def _emit_depth_stencil(ctx, obj, var: str, indent: str = "    ") -> None:
+    if obj is None:
+        return
+    de = 1 if sd_value(sd_child(obj, "DepthEnable")) else 0
+    se = 1 if sd_value(sd_child(obj, "StencilEnable")) else 0
+    ctx.emit(f"{indent}{var}.DepthEnable = {de};")
+    _emit_assigns(ctx, indent, var, obj, [
+        ("DepthWriteMask", "enum", "D3D12_DEPTH_WRITE_MASK_ALL"),
+        ("DepthFunc", "enum", "D3D12_COMPARISON_FUNC_LESS"),
+    ])
+    ctx.emit(f"{indent}{var}.StencilEnable = {se};")
+    smr = sd_uint(obj, "StencilReadMask", 0xFF)
+    smw = sd_uint(obj, "StencilWriteMask", 0xFF)
+    ctx.emit(f"{indent}{var}.StencilReadMask = (UINT8){smr};")
+    ctx.emit(f"{indent}{var}.StencilWriteMask = (UINT8){smw};")
+    for face in ("FrontFace", "BackFace"):
+        f = sd_child(obj, face)
+        if f is None:
+            continue
+        sf = sd_enum_str(f, "StencilFailOp", "D3D12_STENCIL_OP_KEEP")
+        sd = sd_enum_str(f, "StencilDepthFailOp", "D3D12_STENCIL_OP_KEEP")
+        sp = sd_enum_str(f, "StencilPassOp", "D3D12_STENCIL_OP_KEEP")
+        sfn = sd_enum_str(f, "StencilFunc", "D3D12_COMPARISON_FUNC_ALWAYS")
+        ctx.emit(f"{indent}{var}.{face}.StencilFailOp = {enum_token(sf)};")
+        ctx.emit(f"{indent}{var}.{face}.StencilDepthFailOp = {enum_token(sd)};")
+        ctx.emit(f"{indent}{var}.{face}.StencilPassOp = {enum_token(sp)};")
+        ctx.emit(f"{indent}{var}.{face}.StencilFunc = {enum_token(sfn)};")
+
+
+def _emit_input_layout(ctx, obj, prefix: str, indent: str = "    ") -> None:
+    """Emit a static array for the input layout, then point ``prefix.InputLayout``
+    at it. Uses a local static so the lifetime survives the desc-build scope.
+    """
+    if obj is None:
+        return
+    elems = sd_child(obj, "pInputElementDescs")
+    if elems is None or elems.NumChildren() == 0:
+        ctx.emit(f"{indent}{prefix}.InputLayout.pInputElementDescs = nullptr;")
+        ctx.emit(f"{indent}{prefix}.InputLayout.NumElements = 0;")
+        return
+    n = elems.NumChildren()
+    # Build a brace-initialised array of D3D12_INPUT_ELEMENT_DESC.
+    # SemanticName needs a stable pointer; we emit a wide-scope static.
+    ctx.emit(f"{indent}static const D3D12_INPUT_ELEMENT_DESC kElems_{id(obj) & 0xFFFFFF:x}[{n}] = {{")
+    arr_name = f"kElems_{id(obj) & 0xFFFFFF:x}"
+    for i in range(n):
+        e = elems.GetChild(i)
+        sem = sd_value(sd_child(e, "SemanticName")) or ""
+        sidx = sd_uint(e, "SemanticIndex", 0)
+        fmt = sd_enum_str(e, "Format", "DXGI_FORMAT_UNKNOWN")
+        islot = sd_uint(e, "InputSlot", 0)
+        bo = sd_uint(e, "AlignedByteOffset", 0)
+        klass = sd_enum_str(e, "InputSlotClass", "D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA")
+        stp = sd_uint(e, "InstanceDataStepRate", 0)
+        ctx.emit(f"{indent}  {{ {cpp_string(str(sem))}, {sidx}, {enum_token(fmt)}, "
+                 f"{islot}, {bo}, {enum_token(klass)}, {stp} }},")
+    ctx.emit(f"{indent}}};")
+    ctx.emit(f"{indent}{prefix}.InputLayout.pInputElementDescs = {arr_name};")
+    ctx.emit(f"{indent}{prefix}.InputLayout.NumElements = {n};")
+
+
+def _emit_shader_byte_code(ctx, shader_obj, var: str, label: str, indent: str = "    ") -> None:
+    """For each shader stage in a graphics PSO desc (``shader_obj`` is the
+    D3D12_SHADER_BYTECODE subobject), emit a TODO loader comment.
+
+    The actual bytecode is in ``shader_obj.pShaderBytecode`` as a structured
+    byte array; we don't extract it inline because that bloats the generated
+    source. Instead the user matches the PSO ResourceId against the
+    ``shaders/<hash>.cso`` files extracted via shader reflection.
+    """
+    if shader_obj is None:
+        return
+    bc_len = sd_uint(shader_obj, "BytecodeLength", 0)
+    if bc_len == 0:
+        return
+    ctx.emit(f"{indent}// TODO {label}: load {bc_len}-byte shader blob from shaders/<hash>.cso "
+             f"and set {var}.pShaderBytecode / .BytecodeLength.")
+
+
+def _emit_pso_common_tail(ctx, desc_obj, var: str, indent: str = "    ") -> None:
+    """Emit fields shared by graphics + compute PSO desc tails: NodeMask,
+    CachedPSO, Flags.
+    """
+    ctx.emit(f"{indent}{var}.NodeMask = 0u;")
+    ctx.emit(f"{indent}{var}.CachedPSO.pCachedBlob = nullptr; {var}.CachedPSO.CachedBlobSizeInBytes = 0;")
+    flags = sd_enum_str(desc_obj, "Flags", "D3D12_PIPELINE_STATE_FLAG_NONE")
+    ctx.emit(f"{indent}{var}.Flags = {enum_token(flags)};")
 
 
 @emitter("ID3D12Device::CreateGraphicsPipelineState")
@@ -643,13 +824,43 @@ def emit_create_graphics_pso(ctx: ExportContext, chunk) -> None:
     if rid is None:
         return
     name = declare_resource(ctx, rid, "PipelineState", "ID3D12PipelineState")
-    ctx.emit(f"  /* TODO populate D3D12_GRAPHICS_PIPELINE_STATE_DESC for {name} */")
+    desc = sd_child(chunk, "pDesc")
+    if desc is None:
+        ctx.emit(f"  /* CreateGraphicsPipelineState: missing pDesc */")
+        return
     ctx.emit(f"  {{")
     ctx.emit(f"    D3D12_GRAPHICS_PIPELINE_STATE_DESC d = {{}};")
-    rs = sd_resource(sd_child(chunk, "pDesc"), "pRootSignature")
+    rs = sd_resource(desc, "pRootSignature")
     if rs is not None:
-        ctx.emit(f"    d.pRootSignature = {use_resource(ctx, rs)};")
-    ctx.emit(f"    // ... shaders, input layout, render target formats, blend, etc.")
+        ctx.emit(f"    d.pRootSignature = {use_resource(ctx, rs, register_as=('RootSignature', 'ID3D12RootSignature'))};")
+    for stage_field, label in (("VS", "VS bytecode"), ("PS", "PS bytecode"),
+                                ("DS", "DS bytecode"), ("HS", "HS bytecode"),
+                                ("GS", "GS bytecode")):
+        _emit_shader_byte_code(ctx, sd_child(desc, stage_field), f"d.{stage_field}", label)
+    _emit_blend_state(ctx, sd_child(desc, "BlendState"), "d.BlendState")
+    sm = sd_uint(desc, "SampleMask", 0xFFFFFFFF)
+    ctx.emit(f"    d.SampleMask = {sm}u;")
+    _emit_rasterizer(ctx, sd_child(desc, "RasterizerState"), "d.RasterizerState")
+    _emit_depth_stencil(ctx, sd_child(desc, "DepthStencilState"), "d.DepthStencilState")
+    _emit_input_layout(ctx, sd_child(desc, "InputLayout"), "d")
+    ibsc = sd_enum_str(desc, "IBStripCutValue", "D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED")
+    ctx.emit(f"    d.IBStripCutValue = {enum_token(ibsc)};")
+    topo = sd_enum_str(desc, "PrimitiveTopologyType", "D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE")
+    ctx.emit(f"    d.PrimitiveTopologyType = {enum_token(topo)};")
+    num_rts = sd_uint(desc, "NumRenderTargets", 0)
+    ctx.emit(f"    d.NumRenderTargets = {num_rts}u;")
+    rts = sd_child(desc, "RTVFormats")
+    if rts is not None:
+        for i in range(min(rts.NumChildren(), 8)):
+            f = sd_value(rts.GetChild(i))
+            ctx.emit(f"    d.RTVFormats[{i}] = {enum_token(str(f) if f else 'DXGI_FORMAT_UNKNOWN')};")
+    dsv_fmt = sd_enum_str(desc, "DSVFormat", "DXGI_FORMAT_UNKNOWN")
+    ctx.emit(f"    d.DSVFormat = {enum_token(dsv_fmt)};")
+    sd_obj = sd_child(desc, "SampleDesc")
+    if sd_obj is not None:
+        ctx.emit(f"    d.SampleDesc.Count = {sd_uint(sd_obj, 'Count', 1)}u;")
+        ctx.emit(f"    d.SampleDesc.Quality = {sd_uint(sd_obj, 'Quality', 0)}u;")
+    _emit_pso_common_tail(ctx, desc, "d")
     ctx.emit(f"    HR(device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&{name})));")
     ctx.emit(f"  }}")
 
@@ -660,25 +871,102 @@ def emit_create_compute_pso(ctx: ExportContext, chunk) -> None:
     if rid is None:
         return
     name = declare_resource(ctx, rid, "PipelineState", "ID3D12PipelineState")
-    rs = sd_resource(sd_child(chunk, "pDesc"), "pRootSignature")
+    desc = sd_child(chunk, "pDesc")
+    if desc is None:
+        ctx.emit(f"  /* CreateComputePipelineState: missing pDesc */")
+        return
     ctx.emit(f"  {{")
     ctx.emit(f"    D3D12_COMPUTE_PIPELINE_STATE_DESC d = {{}};")
+    rs = sd_resource(desc, "pRootSignature")
     if rs is not None:
-        ctx.emit(f"    d.pRootSignature = {use_resource(ctx, rs)};")
-    ctx.emit(f"    /* TODO populate CS bytecode for {name} */")
+        ctx.emit(f"    d.pRootSignature = {use_resource(ctx, rs, register_as=('RootSignature', 'ID3D12RootSignature'))};")
+    _emit_shader_byte_code(ctx, sd_child(desc, "CS"), "d.CS", "CS bytecode")
+    _emit_pso_common_tail(ctx, desc, "d")
     ctx.emit(f"    HR(device->CreateComputePipelineState(&d, IID_PPV_ARGS(&{name})));")
     ctx.emit(f"  }}")
 
 
 @emitter("ID3D12Device2::CreatePipelineState")
 def emit_create_pipeline_state_stream(ctx: ExportContext, chunk) -> None:
+    """Convert an expanded stream-PSO chunk back to the simpler graphics or
+    compute pipeline state desc and call CreateXxxPipelineState. Mesh shader
+    PSOs (AS/MS) still need the real stream API, so those get a TODO stub —
+    the reconstructed graphics desc is preserved in a comment for the user.
+    """
     rid = sd_resource(chunk, "pPipelineState")
     if rid is None:
         return
     name = declare_resource(ctx, rid, "PipelineState", "ID3D12PipelineState")
-    ctx.emit(
-        f"  /* TODO PipelineStateStream PSO {name}: reconstruct subobjects from chunk */"
-    )
+    desc = sd_child(chunk, "pDesc")
+    if desc is None:
+        ctx.emit(f"  /* CreatePipelineState (stream): missing pDesc for {name} */")
+        return
+
+    cs_obj = sd_child(desc, "CS")
+    cs_len = sd_uint(cs_obj, "BytecodeLength", 0) if cs_obj is not None else 0
+    as_obj = sd_child(desc, "AS")
+    as_len = sd_uint(as_obj, "BytecodeLength", 0) if as_obj is not None else 0
+    ms_obj = sd_child(desc, "MS")
+    ms_len = sd_uint(ms_obj, "BytecodeLength", 0) if ms_obj is not None else 0
+
+    if cs_len > 0:
+        # Compute pipeline path
+        ctx.emit(f"  {{")
+        ctx.emit(f"    D3D12_COMPUTE_PIPELINE_STATE_DESC d = {{}};")
+        rs = sd_resource(desc, "pRootSignature")
+        if rs is not None:
+            ctx.emit(f"    d.pRootSignature = {use_resource(ctx, rs, register_as=('RootSignature', 'ID3D12RootSignature'))};")
+        _emit_shader_byte_code(ctx, cs_obj, "d.CS", "CS bytecode (stream PSO)")
+        _emit_pso_common_tail(ctx, desc, "d")
+        ctx.emit(f"    HR(device->CreateComputePipelineState(&d, IID_PPV_ARGS(&{name})));")
+        ctx.emit(f"  }}")
+        return
+
+    if as_len > 0 or ms_len > 0:
+        # Mesh shader PSO — needs the real stream API. Stub out for now but
+        # surface the subobject shape so the user can wire it up.
+        ctx.emit(
+            f"  /* TODO mesh-shader PSO {name}: reconstruct D3D12_PIPELINE_STATE_STREAM_DESC "
+            f"with AS={as_len}B + MS={ms_len}B + PS={sd_uint(sd_child(desc, 'PS'), 'BytecodeLength', 0)}B */"
+        )
+        return
+
+    # Graphics pipeline path — emit via CreateGraphicsPipelineState.
+    ctx.emit(f"  {{")
+    ctx.emit(f"    D3D12_GRAPHICS_PIPELINE_STATE_DESC d = {{}};")
+    rs = sd_resource(desc, "pRootSignature")
+    if rs is not None:
+        ctx.emit(f"    d.pRootSignature = {use_resource(ctx, rs, register_as=('RootSignature', 'ID3D12RootSignature'))};")
+    for stage_field, label in (("VS", "VS bytecode"), ("PS", "PS bytecode"),
+                                ("DS", "DS bytecode"), ("HS", "HS bytecode"),
+                                ("GS", "GS bytecode")):
+        _emit_shader_byte_code(ctx, sd_child(desc, stage_field), f"d.{stage_field}", label + " (stream PSO)")
+    _emit_blend_state(ctx, sd_child(desc, "BlendState"), "d.BlendState")
+    sm = sd_uint(desc, "SampleMask", 0xFFFFFFFF)
+    ctx.emit(f"    d.SampleMask = {sm}u;")
+    _emit_rasterizer(ctx, sd_child(desc, "RasterizerState"), "d.RasterizerState")
+    _emit_depth_stencil(ctx, sd_child(desc, "DepthStencilState"), "d.DepthStencilState")
+    _emit_input_layout(ctx, sd_child(desc, "InputLayout"), "d")
+    ibsc = sd_enum_str(desc, "IBStripCutValue", "D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED")
+    ctx.emit(f"    d.IBStripCutValue = {enum_token(ibsc)};")
+    topo = sd_enum_str(desc, "PrimitiveTopologyType", "D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE")
+    ctx.emit(f"    d.PrimitiveTopologyType = {enum_token(topo)};")
+    num_rts = sd_uint(desc, "NumRenderTargets", 0)
+    ctx.emit(f"    d.NumRenderTargets = {num_rts}u;")
+    rts = sd_child(desc, "RTVFormats")
+    if rts is not None:
+        for i in range(min(rts.NumChildren(), 8)):
+            f = sd_value(rts.GetChild(i))
+            ctx.emit(f"    d.RTVFormats[{i}] = {enum_token(str(f) if f else 'DXGI_FORMAT_UNKNOWN')};")
+    dsv_fmt = sd_enum_str(desc, "DSVFormat", "DXGI_FORMAT_UNKNOWN")
+    ctx.emit(f"    d.DSVFormat = {enum_token(dsv_fmt)};")
+    sd_obj = sd_child(desc, "SampleDesc")
+    if sd_obj is not None:
+        ctx.emit(f"    d.SampleDesc.Count = {sd_uint(sd_obj, 'Count', 1)}u;")
+        ctx.emit(f"    d.SampleDesc.Quality = {sd_uint(sd_obj, 'Quality', 0)}u;")
+    _emit_pso_common_tail(ctx, desc, "d")
+    ctx.emit(f"    HR(device->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&{name})));")
+    ctx.emit(f"  }}")
 
 
 @emitter("ID3D12Device::CreateCommittedResource")
@@ -771,6 +1059,29 @@ def emit_create_heap(ctx: ExportContext, chunk) -> None:
     ctx.emit(f"  }}")
 
 
+def _emit_resource_desc(ctx, desc, var: str, indent: str = "    ") -> None:
+    """Populate a D3D12_RESOURCE_DESC at ``var`` from a serialised
+    ``D3D12_RESOURCE_DESC`` (or RESOURCE_DESC1) SDObject.
+    """
+    dim = sd_enum_str(desc, "Dimension", "D3D12_RESOURCE_DIMENSION_BUFFER")
+    fmt = sd_enum_str(desc, "Format", "DXGI_FORMAT_UNKNOWN")
+    layout = sd_enum_str(desc, "Layout", "D3D12_TEXTURE_LAYOUT_UNKNOWN")
+    flags = sd_enum_str(desc, "Flags", "D3D12_RESOURCE_FLAG_NONE")
+    samples = sd_uint(sd_child(desc, "SampleDesc"), "Count", 1)
+    sample_q = sd_uint(sd_child(desc, "SampleDesc"), "Quality", 0)
+    ctx.emit(f"{indent}{var}.Dimension = {enum_token(dim)};")
+    ctx.emit(f"{indent}{var}.Alignment = {sd_uint(desc, 'Alignment', 0)}ull;")
+    ctx.emit(f"{indent}{var}.Width = {sd_uint(desc, 'Width', 0)}ull;")
+    ctx.emit(f"{indent}{var}.Height = {sd_uint(desc, 'Height', 1)}u;")
+    ctx.emit(f"{indent}{var}.DepthOrArraySize = (UINT16){sd_uint(desc, 'DepthOrArraySize', 1)};")
+    ctx.emit(f"{indent}{var}.MipLevels = (UINT16){sd_uint(desc, 'MipLevels', 1)};")
+    ctx.emit(f"{indent}{var}.Format = {enum_token(fmt)};")
+    ctx.emit(f"{indent}{var}.SampleDesc.Count = {samples}u;")
+    ctx.emit(f"{indent}{var}.SampleDesc.Quality = {sample_q}u;")
+    ctx.emit(f"{indent}{var}.Layout = {enum_token(layout)};")
+    ctx.emit(f"{indent}{var}.Flags = {enum_token(flags)};")
+
+
 @emitter("ID3D12Device::CreatePlacedResource")
 @emitter("ID3D12Device8::CreatePlacedResource1")
 @emitter("ID3D12Device10::CreatePlacedResource2")
@@ -786,10 +1097,10 @@ def emit_create_placed_resource(ctx: ExportContext, chunk) -> None:
     kind = "Buffer" if "BUFFER" in str(dim) else "Texture2D"
     name = declare_resource(ctx, rid, kind, "ID3D12Resource")
     ctx.emit(f"  {{")
-    ctx.emit(f"    D3D12_RESOURCE_DESC d = {{}}; d.Dimension = {enum_token(dim)};")
-    ctx.emit(f"    /* TODO populate full D3D12_RESOURCE_DESC for {name} */")
+    ctx.emit(f"    D3D12_RESOURCE_DESC d = {{}};")
+    _emit_resource_desc(ctx, desc, "d")
     ctx.emit(
-        f"    HR(device->CreatePlacedResource({use_resource(ctx, heap)}, {offset}, &d, "
+        f"    HR(device->CreatePlacedResource({use_resource(ctx, heap)}, {offset}ull, &d, "
         f"{enum_token(initial_state)}, nullptr, IID_PPV_ARGS(&{name})));"
     )
     ctx.emit(f"  }}")
@@ -806,6 +1117,315 @@ def emit_create_fence(ctx: ExportContext, chunk) -> None:
     ctx.emit(
         f"  HR(device->CreateFence({initial}, {enum_token(flags)}, IID_PPV_ARGS(&{name})));"
     )
+
+
+# ---------------------------------------------------------------------------
+# View desc populators
+#
+# Each populator emits C++ that fills a local variable of the appropriate
+# D3D12_*_VIEW_DESC type. They write into a buffer of lines that the caller
+# splices into its emit() output. The ``var`` argument is the C++ name of the
+# local variable being populated.
+#
+# RenderDoc serialises every view desc with the same field names as the D3D12
+# SDK struct members, plus a per-dimension subobject named after the
+# ViewDimension enumerator (Buffer/Texture1D/Texture2D/Texture2DArray/...).
+# We follow that mapping exactly so the generated code compiles against the
+# stock D3D12 headers.
+# ---------------------------------------------------------------------------
+
+_DIM_TO_SUBOBJ = {
+    # SRV
+    "D3D12_SRV_DIMENSION_BUFFER": "Buffer",
+    "D3D12_SRV_DIMENSION_TEXTURE1D": "Texture1D",
+    "D3D12_SRV_DIMENSION_TEXTURE1DARRAY": "Texture1DArray",
+    "D3D12_SRV_DIMENSION_TEXTURE2D": "Texture2D",
+    "D3D12_SRV_DIMENSION_TEXTURE2DARRAY": "Texture2DArray",
+    "D3D12_SRV_DIMENSION_TEXTURE2DMS": "Texture2DMS",
+    "D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY": "Texture2DMSArray",
+    "D3D12_SRV_DIMENSION_TEXTURE3D": "Texture3D",
+    "D3D12_SRV_DIMENSION_TEXTURECUBE": "TextureCube",
+    "D3D12_SRV_DIMENSION_TEXTURECUBEARRAY": "TextureCubeArray",
+    "D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE": "RaytracingAccelerationStructure",
+    # UAV
+    "D3D12_UAV_DIMENSION_BUFFER": "Buffer",
+    "D3D12_UAV_DIMENSION_TEXTURE1D": "Texture1D",
+    "D3D12_UAV_DIMENSION_TEXTURE1DARRAY": "Texture1DArray",
+    "D3D12_UAV_DIMENSION_TEXTURE2D": "Texture2D",
+    "D3D12_UAV_DIMENSION_TEXTURE2DARRAY": "Texture2DArray",
+    "D3D12_UAV_DIMENSION_TEXTURE2DMS": "Texture2DMS",
+    "D3D12_UAV_DIMENSION_TEXTURE2DMSARRAY": "Texture2DMSArray",
+    "D3D12_UAV_DIMENSION_TEXTURE3D": "Texture3D",
+    # RTV
+    "D3D12_RTV_DIMENSION_BUFFER": "Buffer",
+    "D3D12_RTV_DIMENSION_TEXTURE1D": "Texture1D",
+    "D3D12_RTV_DIMENSION_TEXTURE1DARRAY": "Texture1DArray",
+    "D3D12_RTV_DIMENSION_TEXTURE2D": "Texture2D",
+    "D3D12_RTV_DIMENSION_TEXTURE2DARRAY": "Texture2DArray",
+    "D3D12_RTV_DIMENSION_TEXTURE2DMS": "Texture2DMS",
+    "D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY": "Texture2DMSArray",
+    "D3D12_RTV_DIMENSION_TEXTURE3D": "Texture3D",
+    # DSV
+    "D3D12_DSV_DIMENSION_TEXTURE1D": "Texture1D",
+    "D3D12_DSV_DIMENSION_TEXTURE1DARRAY": "Texture1DArray",
+    "D3D12_DSV_DIMENSION_TEXTURE2D": "Texture2D",
+    "D3D12_DSV_DIMENSION_TEXTURE2DARRAY": "Texture2DArray",
+    "D3D12_DSV_DIMENSION_TEXTURE2DMS": "Texture2DMS",
+    "D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY": "Texture2DMSArray",
+}
+
+
+def _emit_assigns(ctx: "ExportContext", indent: str, lhs_prefix: str, obj, fields):
+    """Emit ``{lhs_prefix}.<field> = <value>;`` for each (name, kind, default)
+    in ``fields``. ``kind`` is ``"uint"`` / ``"int"`` / ``"float"`` / ``"enum"``.
+    """
+    if obj is None:
+        return
+    for entry in fields:
+        if len(entry) == 3:
+            name, kind, default = entry
+        else:
+            name, kind = entry
+            default = 0 if kind in ("uint", "int") else (0.0 if kind == "float" else "")
+        if kind == "uint":
+            v = sd_uint(obj, name, default)
+            ctx.emit(f"{indent}{lhs_prefix}.{name} = {v}u;")
+        elif kind == "int":
+            v = sd_int(obj, name, default)
+            ctx.emit(f"{indent}{lhs_prefix}.{name} = {v};")
+        elif kind == "uint64":
+            v = sd_uint(obj, name, default)
+            ctx.emit(f"{indent}{lhs_prefix}.{name} = {v}ull;")
+        elif kind == "float":
+            v = sd_float(obj, name, default)
+            ctx.emit(f"{indent}{lhs_prefix}.{name} = {cpp_float(v)};")
+        elif kind == "enum":
+            v = sd_enum_str(obj, name, default)
+            ctx.emit(f"{indent}{lhs_prefix}.{name} = {enum_token(v)};")
+
+
+def emit_srv_desc(ctx: "ExportContext", desc_obj, var: str, indent: str = "    ") -> None:
+    """Populate a D3D12_SHADER_RESOURCE_VIEW_DESC into local var ``var``."""
+    fmt = sd_enum_str(desc_obj, "Format", "DXGI_FORMAT_UNKNOWN")
+    dim = sd_enum_str(desc_obj, "ViewDimension", "D3D12_SRV_DIMENSION_UNKNOWN")
+    mapping = sd_uint(desc_obj, "Shader4ComponentMapping", 0x1688)
+    ctx.emit(f"{indent}{var}.Format = {enum_token(fmt)};")
+    ctx.emit(f"{indent}{var}.ViewDimension = {enum_token(dim)};")
+    ctx.emit(f"{indent}{var}.Shader4ComponentMapping = {mapping}u;")
+    sub_name = _DIM_TO_SUBOBJ.get(dim)
+    if sub_name is None:
+        return
+    sub = sd_child(desc_obj, sub_name)
+    if sub is None:
+        return
+    lhs = f"{var}.{sub_name}"
+    if sub_name == "Buffer":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("FirstElement", "uint64"), ("NumElements", "uint"),
+            ("StructureByteStride", "uint"), ("Flags", "enum", "D3D12_BUFFER_SRV_FLAG_NONE"),
+        ])
+    elif sub_name in ("Texture1D", "TextureCube"):
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("MostDetailedMip", "uint"), ("MipLevels", "uint"),
+            ("ResourceMinLODClamp", "float"),
+        ])
+    elif sub_name == "Texture1DArray":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("MostDetailedMip", "uint"), ("MipLevels", "uint"),
+            ("FirstArraySlice", "uint"), ("ArraySize", "uint"),
+            ("ResourceMinLODClamp", "float"),
+        ])
+    elif sub_name == "Texture2D":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("MostDetailedMip", "uint"), ("MipLevels", "uint"),
+            ("PlaneSlice", "uint"), ("ResourceMinLODClamp", "float"),
+        ])
+    elif sub_name == "Texture2DArray":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("MostDetailedMip", "uint"), ("MipLevels", "uint"),
+            ("FirstArraySlice", "uint"), ("ArraySize", "uint"),
+            ("PlaneSlice", "uint"), ("ResourceMinLODClamp", "float"),
+        ])
+    elif sub_name == "Texture3D":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("MostDetailedMip", "uint"), ("MipLevels", "uint"),
+            ("ResourceMinLODClamp", "float"),
+        ])
+    elif sub_name == "TextureCubeArray":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("MostDetailedMip", "uint"), ("MipLevels", "uint"),
+            ("First2DArrayFace", "uint"), ("NumCubes", "uint"),
+            ("ResourceMinLODClamp", "float"),
+        ])
+    elif sub_name == "Texture2DMS":
+        ctx.emit(f"{indent}// Texture2DMS variant has no fields")
+    elif sub_name == "Texture2DMSArray":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("FirstArraySlice", "uint"), ("ArraySize", "uint"),
+        ])
+    elif sub_name == "RaytracingAccelerationStructure":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("Location", "uint64"),
+        ])
+
+
+def emit_uav_desc(ctx: "ExportContext", desc_obj, var: str, indent: str = "    ") -> None:
+    fmt = sd_enum_str(desc_obj, "Format", "DXGI_FORMAT_UNKNOWN")
+    dim = sd_enum_str(desc_obj, "ViewDimension", "D3D12_UAV_DIMENSION_UNKNOWN")
+    ctx.emit(f"{indent}{var}.Format = {enum_token(fmt)};")
+    ctx.emit(f"{indent}{var}.ViewDimension = {enum_token(dim)};")
+    sub_name = _DIM_TO_SUBOBJ.get(dim)
+    if sub_name is None:
+        return
+    sub = sd_child(desc_obj, sub_name)
+    if sub is None:
+        return
+    lhs = f"{var}.{sub_name}"
+    if sub_name == "Buffer":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("FirstElement", "uint64"), ("NumElements", "uint"),
+            ("StructureByteStride", "uint"), ("CounterOffsetInBytes", "uint64"),
+            ("Flags", "enum", "D3D12_BUFFER_UAV_FLAG_NONE"),
+        ])
+    elif sub_name == "Texture1D":
+        _emit_assigns(ctx, indent, lhs, sub, [("MipSlice", "uint")])
+    elif sub_name == "Texture1DArray":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("MipSlice", "uint"), ("FirstArraySlice", "uint"), ("ArraySize", "uint"),
+        ])
+    elif sub_name == "Texture2D":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("MipSlice", "uint"), ("PlaneSlice", "uint"),
+        ])
+    elif sub_name == "Texture2DArray":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("MipSlice", "uint"), ("FirstArraySlice", "uint"),
+            ("ArraySize", "uint"), ("PlaneSlice", "uint"),
+        ])
+    elif sub_name == "Texture2DMS":
+        ctx.emit(f"{indent}// Texture2DMS variant has no fields")
+    elif sub_name == "Texture2DMSArray":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("FirstArraySlice", "uint"), ("ArraySize", "uint"),
+        ])
+    elif sub_name == "Texture3D":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("MipSlice", "uint"), ("FirstWSlice", "uint"), ("WSize", "uint"),
+        ])
+
+
+def emit_rtv_desc(ctx: "ExportContext", desc_obj, var: str, indent: str = "    ") -> None:
+    fmt = sd_enum_str(desc_obj, "Format", "DXGI_FORMAT_UNKNOWN")
+    dim = sd_enum_str(desc_obj, "ViewDimension", "D3D12_RTV_DIMENSION_UNKNOWN")
+    ctx.emit(f"{indent}{var}.Format = {enum_token(fmt)};")
+    ctx.emit(f"{indent}{var}.ViewDimension = {enum_token(dim)};")
+    sub_name = _DIM_TO_SUBOBJ.get(dim)
+    if sub_name is None:
+        return
+    sub = sd_child(desc_obj, sub_name)
+    if sub is None:
+        return
+    lhs = f"{var}.{sub_name}"
+    if sub_name == "Buffer":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("FirstElement", "uint64"), ("NumElements", "uint"),
+        ])
+    elif sub_name == "Texture1D":
+        _emit_assigns(ctx, indent, lhs, sub, [("MipSlice", "uint")])
+    elif sub_name == "Texture1DArray":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("MipSlice", "uint"), ("FirstArraySlice", "uint"), ("ArraySize", "uint"),
+        ])
+    elif sub_name == "Texture2D":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("MipSlice", "uint"), ("PlaneSlice", "uint"),
+        ])
+    elif sub_name == "Texture2DArray":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("MipSlice", "uint"), ("FirstArraySlice", "uint"),
+            ("ArraySize", "uint"), ("PlaneSlice", "uint"),
+        ])
+    elif sub_name == "Texture2DMS":
+        ctx.emit(f"{indent}// Texture2DMS variant has no fields")
+    elif sub_name == "Texture2DMSArray":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("FirstArraySlice", "uint"), ("ArraySize", "uint"),
+        ])
+    elif sub_name == "Texture3D":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("MipSlice", "uint"), ("FirstWSlice", "uint"), ("WSize", "uint"),
+        ])
+
+
+def emit_dsv_desc(ctx: "ExportContext", desc_obj, var: str, indent: str = "    ") -> None:
+    fmt = sd_enum_str(desc_obj, "Format", "DXGI_FORMAT_UNKNOWN")
+    flags = sd_enum_str(desc_obj, "Flags", "D3D12_DSV_FLAG_NONE")
+    dim = sd_enum_str(desc_obj, "ViewDimension", "D3D12_DSV_DIMENSION_UNKNOWN")
+    ctx.emit(f"{indent}{var}.Format = {enum_token(fmt)};")
+    ctx.emit(f"{indent}{var}.Flags = {enum_token(flags)};")
+    ctx.emit(f"{indent}{var}.ViewDimension = {enum_token(dim)};")
+    sub_name = _DIM_TO_SUBOBJ.get(dim)
+    if sub_name is None:
+        return
+    sub = sd_child(desc_obj, sub_name)
+    if sub is None:
+        return
+    lhs = f"{var}.{sub_name}"
+    if sub_name == "Texture1D":
+        _emit_assigns(ctx, indent, lhs, sub, [("MipSlice", "uint")])
+    elif sub_name == "Texture1DArray":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("MipSlice", "uint"), ("FirstArraySlice", "uint"), ("ArraySize", "uint"),
+        ])
+    elif sub_name == "Texture2D":
+        _emit_assigns(ctx, indent, lhs, sub, [("MipSlice", "uint")])
+    elif sub_name == "Texture2DArray":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("MipSlice", "uint"), ("FirstArraySlice", "uint"), ("ArraySize", "uint"),
+        ])
+    elif sub_name == "Texture2DMS":
+        ctx.emit(f"{indent}// Texture2DMS variant has no fields")
+    elif sub_name == "Texture2DMSArray":
+        _emit_assigns(ctx, indent, lhs, sub, [
+            ("FirstArraySlice", "uint"), ("ArraySize", "uint"),
+        ])
+
+
+def emit_sampler_desc(ctx: "ExportContext", desc_obj, var: str, indent: str = "    ") -> None:
+    """Populate a D3D12_SAMPLER_DESC from the chunk's sampler desc subobject.
+
+    RenderDoc internally uses D3D12_SAMPLER_DESC2 but the field layout is
+    compatible with D3D12_SAMPLER_DESC up through MaxLOD; we ignore the
+    Sampler2-only Flags field and FloatBorderColor union (using the float
+    variant which matches the captured data).
+    """
+    filt = sd_enum_str(desc_obj, "Filter", "D3D12_FILTER_MIN_MAG_MIP_LINEAR")
+    addr_u = sd_enum_str(desc_obj, "AddressU", "D3D12_TEXTURE_ADDRESS_MODE_CLAMP")
+    addr_v = sd_enum_str(desc_obj, "AddressV", "D3D12_TEXTURE_ADDRESS_MODE_CLAMP")
+    addr_w = sd_enum_str(desc_obj, "AddressW", "D3D12_TEXTURE_ADDRESS_MODE_CLAMP")
+    bias = cpp_float(sd_float(desc_obj, "MipLODBias", 0.0))
+    aniso = sd_uint(desc_obj, "MaxAnisotropy", 1)
+    cmp = sd_enum_str(desc_obj, "ComparisonFunc", "D3D12_COMPARISON_FUNC_NEVER")
+    min_lod = cpp_float(sd_float(desc_obj, "MinLOD", 0.0))
+    max_lod = cpp_float(sd_float(desc_obj, "MaxLOD", 3.402823466e+38))
+    border = sd_child(desc_obj, "FloatBorderColor") or sd_child(desc_obj, "BorderColor")
+    if border is not None and border.NumChildren() >= 4:
+        bvs = [cpp_float(sd_value(border.GetChild(i)) or 0.0) for i in range(4)]
+    else:
+        bvs = ["0.0f", "0.0f", "0.0f", "0.0f"]
+    ctx.emit(f"{indent}{var}.Filter = {enum_token(filt)};")
+    ctx.emit(f"{indent}{var}.AddressU = {enum_token(addr_u)};")
+    ctx.emit(f"{indent}{var}.AddressV = {enum_token(addr_v)};")
+    ctx.emit(f"{indent}{var}.AddressW = {enum_token(addr_w)};")
+    ctx.emit(f"{indent}{var}.MipLODBias = {bias};")
+    ctx.emit(f"{indent}{var}.MaxAnisotropy = {aniso}u;")
+    ctx.emit(f"{indent}{var}.ComparisonFunc = {enum_token(cmp)};")
+    ctx.emit(f"{indent}{var}.BorderColor[0] = {bvs[0]};")
+    ctx.emit(f"{indent}{var}.BorderColor[1] = {bvs[1]};")
+    ctx.emit(f"{indent}{var}.BorderColor[2] = {bvs[2]};")
+    ctx.emit(f"{indent}{var}.BorderColor[3] = {bvs[3]};")
+    ctx.emit(f"{indent}{var}.MinLOD = {min_lod};")
+    ctx.emit(f"{indent}{var}.MaxLOD = {max_lod};")
 
 
 def _view_desc_subobject(chunk):
@@ -847,15 +1467,30 @@ def emit_create_cbv(ctx, chunk):
     ctx.emit(f"  }}")
 
 
+def _view_inner_desc(chunk):
+    """The view-specific desc (D3D12_*_VIEW_DESC) lives at chunk.desc.Descriptor
+    for Create*View chunks. Returns the SDObject or None if missing.
+    """
+    outer = _view_desc_subobject(chunk)
+    if outer is None:
+        return None
+    return sd_child(outer, "Descriptor")
+
+
 @emitter("ID3D12Device::CreateShaderResourceView")
 def emit_create_srv(ctx, chunk):
     dst = cpu_handle_expr(ctx, _view_destination(chunk))
     res = _view_resource(chunk)
     res_arg = use_resource(ctx, res, register_as=("Texture2D", "ID3D12Resource"))
-    ctx.emit(
-        f"  /* TODO populate D3D12_SHADER_RESOURCE_VIEW_DESC from desc.Descriptor if non-default */"
-    )
-    ctx.emit(f"  device->CreateShaderResourceView({res_arg}, nullptr, {dst});")
+    inner = _view_inner_desc(chunk)
+    if inner is None:
+        ctx.emit(f"  device->CreateShaderResourceView({res_arg}, nullptr, {dst});")
+        return
+    ctx.emit(f"  {{")
+    ctx.emit(f"    D3D12_SHADER_RESOURCE_VIEW_DESC vd = {{}};")
+    emit_srv_desc(ctx, inner, "vd")
+    ctx.emit(f"    device->CreateShaderResourceView({res_arg}, &vd, {dst});")
+    ctx.emit(f"  }}")
 
 
 @emitter("ID3D12Device::CreateUnorderedAccessView")
@@ -866,8 +1501,15 @@ def emit_create_uav(ctx, chunk):
     counter = sd_resource(desc, "CounterResource") if desc is not None else None
     res_arg = use_resource(ctx, res, register_as=("Texture2D", "ID3D12Resource"))
     cnt_arg = use_resource(ctx, counter, register_as=("Buffer", "ID3D12Resource")) if counter is not None else "nullptr"
-    ctx.emit(f"  /* TODO populate D3D12_UNORDERED_ACCESS_VIEW_DESC from desc.Descriptor if non-default */")
-    ctx.emit(f"  device->CreateUnorderedAccessView({res_arg}, {cnt_arg}, nullptr, {dst});")
+    inner = _view_inner_desc(chunk)
+    if inner is None:
+        ctx.emit(f"  device->CreateUnorderedAccessView({res_arg}, {cnt_arg}, nullptr, {dst});")
+        return
+    ctx.emit(f"  {{")
+    ctx.emit(f"    D3D12_UNORDERED_ACCESS_VIEW_DESC vd = {{}};")
+    emit_uav_desc(ctx, inner, "vd")
+    ctx.emit(f"    device->CreateUnorderedAccessView({res_arg}, {cnt_arg}, &vd, {dst});")
+    ctx.emit(f"  }}")
 
 
 @emitter("ID3D12Device::CreateRenderTargetView")
@@ -875,8 +1517,15 @@ def emit_create_rtv(ctx, chunk):
     dst = cpu_handle_expr(ctx, _view_destination(chunk))
     res = _view_resource(chunk)
     res_arg = use_resource(ctx, res, register_as=("Texture2D", "ID3D12Resource"))
-    ctx.emit(f"  /* TODO populate D3D12_RENDER_TARGET_VIEW_DESC from desc.Descriptor if non-default */")
-    ctx.emit(f"  device->CreateRenderTargetView({res_arg}, nullptr, {dst});")
+    inner = _view_inner_desc(chunk)
+    if inner is None:
+        ctx.emit(f"  device->CreateRenderTargetView({res_arg}, nullptr, {dst});")
+        return
+    ctx.emit(f"  {{")
+    ctx.emit(f"    D3D12_RENDER_TARGET_VIEW_DESC vd = {{}};")
+    emit_rtv_desc(ctx, inner, "vd")
+    ctx.emit(f"    device->CreateRenderTargetView({res_arg}, &vd, {dst});")
+    ctx.emit(f"  }}")
 
 
 @emitter("ID3D12Device::CreateDepthStencilView")
@@ -884,22 +1533,32 @@ def emit_create_dsv(ctx, chunk):
     dst = cpu_handle_expr(ctx, _view_destination(chunk))
     res = _view_resource(chunk)
     res_arg = use_resource(ctx, res, register_as=("Texture2D", "ID3D12Resource"))
-    ctx.emit(f"  /* TODO populate D3D12_DEPTH_STENCIL_VIEW_DESC from desc.Descriptor if non-default */")
-    ctx.emit(f"  device->CreateDepthStencilView({res_arg}, nullptr, {dst});")
+    inner = _view_inner_desc(chunk)
+    if inner is None:
+        ctx.emit(f"  device->CreateDepthStencilView({res_arg}, nullptr, {dst});")
+        return
+    ctx.emit(f"  {{")
+    ctx.emit(f"    D3D12_DEPTH_STENCIL_VIEW_DESC vd = {{}};")
+    emit_dsv_desc(ctx, inner, "vd")
+    ctx.emit(f"    device->CreateDepthStencilView({res_arg}, &vd, {dst});")
+    ctx.emit(f"  }}")
 
 
 @emitter("ID3D12Device::CreateSampler")
 @emitter("ID3D12Device11::CreateSampler2")
 def emit_create_sampler(ctx, chunk):
     dst = cpu_handle_expr(ctx, _view_destination(chunk))
+    inner = _view_inner_desc(chunk)
     ctx.emit(f"  {{")
     ctx.emit(f"    D3D12_SAMPLER_DESC sd = {{}};")
-    ctx.emit(f"    sd.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;")
-    ctx.emit(f"    sd.AddressU = sd.AddressV = sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;")
-    ctx.emit(f"    sd.MaxAnisotropy = 1;")
-    ctx.emit(f"    sd.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;")
-    ctx.emit(f"    sd.MinLOD = 0.0f; sd.MaxLOD = D3D12_FLOAT32_MAX;")
-    ctx.emit(f"    /* TODO populate from desc.Descriptor; default linear-clamp used */")
+    if inner is not None:
+        emit_sampler_desc(ctx, inner, "sd")
+    else:
+        ctx.emit(f"    sd.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;")
+        ctx.emit(f"    sd.AddressU = sd.AddressV = sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;")
+        ctx.emit(f"    sd.MaxAnisotropy = 1;")
+        ctx.emit(f"    sd.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;")
+        ctx.emit(f"    sd.MinLOD = 0.0f; sd.MaxLOD = D3D12_FLOAT32_MAX;")
     ctx.emit(f"    device->CreateSampler(&sd, {dst});")
     ctx.emit(f"  }}")
 
@@ -979,7 +1638,46 @@ def emit_list_reset(ctx, chunk):
 
 @emitter("ID3D12GraphicsCommandList::ResourceBarrier")
 def emit_resource_barrier(ctx, chunk):
-    ctx.emit(f"  /* TODO ResourceBarrier: walk Barriers array */")
+    cv = cmdlist_var(ctx, chunk)
+    barriers = sd_child(chunk, "pBarriers")
+    if barriers is None or barriers.NumChildren() == 0:
+        ctx.emit(f"  {cv}->ResourceBarrier(0, nullptr);")
+        return
+    n = barriers.NumChildren()
+    ctx.emit(f"  {{")
+    ctx.emit(f"    D3D12_RESOURCE_BARRIER bs[{n}] = {{}};")
+    for i in range(n):
+        b = barriers.GetChild(i)
+        typ = sd_enum_str(b, "Type", "D3D12_RESOURCE_BARRIER_TYPE_TRANSITION")
+        flags = sd_enum_str(b, "Flags", "D3D12_RESOURCE_BARRIER_FLAG_NONE")
+        ctx.emit(f"    bs[{i}].Type = {enum_token(typ)};")
+        ctx.emit(f"    bs[{i}].Flags = {enum_token(flags)};")
+        if "TRANSITION" in typ:
+            t = sd_child(b, "Transition")
+            res = use_resource(ctx, sd_resource(t, "pResource"),
+                               register_as=("Texture2D", "ID3D12Resource"))
+            sub = sd_uint(t, "Subresource", 0xFFFFFFFF)
+            sb = sd_enum_str(t, "StateBefore", "D3D12_RESOURCE_STATE_COMMON")
+            sa = sd_enum_str(t, "StateAfter", "D3D12_RESOURCE_STATE_COMMON")
+            ctx.emit(f"    bs[{i}].Transition.pResource = {res};")
+            ctx.emit(f"    bs[{i}].Transition.Subresource = {sub}u;")
+            ctx.emit(f"    bs[{i}].Transition.StateBefore = {enum_token(sb)};")
+            ctx.emit(f"    bs[{i}].Transition.StateAfter = {enum_token(sa)};")
+        elif "ALIASING" in typ:
+            a = sd_child(b, "Aliasing")
+            rb = use_resource(ctx, sd_resource(a, "pResourceBefore"),
+                              register_as=("Texture2D", "ID3D12Resource"))
+            ra = use_resource(ctx, sd_resource(a, "pResourceAfter"),
+                              register_as=("Texture2D", "ID3D12Resource"))
+            ctx.emit(f"    bs[{i}].Aliasing.pResourceBefore = {rb};")
+            ctx.emit(f"    bs[{i}].Aliasing.pResourceAfter = {ra};")
+        elif "UAV" in typ:
+            u = sd_child(b, "UAV")
+            res = use_resource(ctx, sd_resource(u, "pResource"),
+                               register_as=("Texture2D", "ID3D12Resource"))
+            ctx.emit(f"    bs[{i}].UAV.pResource = {res};")
+    ctx.emit(f"    {cv}->ResourceBarrier({n}, bs);")
+    ctx.emit(f"  }}")
 
 
 @emitter("ID3D12GraphicsCommandList::SetPipelineState")
@@ -1330,11 +2028,51 @@ def emit_copy_buffer_region(ctx, chunk):
     )
 
 
+def _emit_texture_copy_location(ctx, obj, var: str, indent: str = "    ") -> None:
+    """Emit C++ that populates a local ``D3D12_TEXTURE_COPY_LOCATION`` from a
+    serialised ``D3D12_TEXTURE_COPY_LOCATION`` SDObject."""
+    res = use_resource(ctx, sd_resource(obj, "pResource"),
+                       register_as=("Texture2D", "ID3D12Resource"))
+    typ = sd_enum_str(obj, "Type", "D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX")
+    ctx.emit(f"{indent}{var}.pResource = {res};")
+    ctx.emit(f"{indent}{var}.Type = {enum_token(typ)};")
+    if "PLACED_FOOTPRINT" in typ:
+        pf = sd_child(obj, "PlacedFootprint")
+        offset = sd_uint(pf, "Offset", 0)
+        fp = sd_child(pf, "Footprint")
+        fmt = sd_enum_str(fp, "Format", "DXGI_FORMAT_UNKNOWN")
+        ctx.emit(f"{indent}{var}.PlacedFootprint.Offset = {offset}ull;")
+        ctx.emit(f"{indent}{var}.PlacedFootprint.Footprint.Format = {enum_token(fmt)};")
+        ctx.emit(f"{indent}{var}.PlacedFootprint.Footprint.Width = {sd_uint(fp, 'Width', 0)}u;")
+        ctx.emit(f"{indent}{var}.PlacedFootprint.Footprint.Height = {sd_uint(fp, 'Height', 0)}u;")
+        ctx.emit(f"{indent}{var}.PlacedFootprint.Footprint.Depth = {sd_uint(fp, 'Depth', 1)}u;")
+        ctx.emit(f"{indent}{var}.PlacedFootprint.Footprint.RowPitch = {sd_uint(fp, 'RowPitch', 0)}u;")
+    else:
+        ctx.emit(f"{indent}{var}.SubresourceIndex = {sd_uint(obj, 'SubresourceIndex', 0)}u;")
+
+
 @emitter("ID3D12GraphicsCommandList::CopyTextureRegion")
 def emit_copy_texture_region(ctx, chunk):
-    ctx.emit(
-        f"  /* TODO CopyTextureRegion: needs D3D12_TEXTURE_COPY_LOCATION dst/src reconstruction */"
-    )
+    cv = cmdlist_var(ctx, chunk)
+    dst = sd_child(chunk, "dst")
+    src = sd_child(chunk, "src")
+    dst_x = sd_uint(chunk, "DstX", 0)
+    dst_y = sd_uint(chunk, "DstY", 0)
+    dst_z = sd_uint(chunk, "DstZ", 0)
+    box = sd_child(chunk, "pSrcBox")
+    ctx.emit(f"  {{")
+    ctx.emit(f"    D3D12_TEXTURE_COPY_LOCATION dst = {{}};")
+    _emit_texture_copy_location(ctx, dst, "dst")
+    ctx.emit(f"    D3D12_TEXTURE_COPY_LOCATION src = {{}};")
+    _emit_texture_copy_location(ctx, src, "src")
+    if box is not None:
+        ctx.emit(f"    D3D12_BOX box = {{ {sd_uint(box, 'left')}u, {sd_uint(box, 'top')}u, "
+                 f"{sd_uint(box, 'front')}u, {sd_uint(box, 'right')}u, "
+                 f"{sd_uint(box, 'bottom')}u, {sd_uint(box, 'back')}u }};")
+        ctx.emit(f"    {cv}->CopyTextureRegion(&dst, {dst_x}, {dst_y}, {dst_z}, &src, &box);")
+    else:
+        ctx.emit(f"    {cv}->CopyTextureRegion(&dst, {dst_x}, {dst_y}, {dst_z}, &src, nullptr);")
+    ctx.emit(f"  }}")
 
 
 @emitter("ID3D12GraphicsCommandList::ResolveSubresource")
@@ -1704,6 +2442,27 @@ static inline D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle(ID3D12DescriptorHeap *heap, 
     D3D12_GPU_DESCRIPTOR_HANDLE h = heap->GetGPUDescriptorHandleForHeapStart();
     h.ptr += UINT64(slot) * device->GetDescriptorHandleIncrementSize(heap->GetDesc().Type);
     return h;
+}
+
+// Reads a blob file (root signature, shader bytecode, etc.) from disk into a
+// std::vector. Returns an empty vector on failure.
+#include <vector>
+static inline std::vector<uint8_t> LoadBlob(const char *path) {
+    std::vector<uint8_t> out;
+    FILE *f = std::fopen(path, "rb");
+    if(!f) {
+        std::fprintf(stderr, "LoadBlob: failed to open %s\n", path);
+        return out;
+    }
+    std::fseek(f, 0, SEEK_END);
+    long n = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if(n > 0) {
+        out.resize((size_t)n);
+        std::fread(out.data(), 1, (size_t)n, f);
+    }
+    std::fclose(f);
+    return out;
 }
 
 """
