@@ -375,6 +375,23 @@ DECLARE_REFLECTION_STRUCT(BugReport);
   CONFIG_SETTING_VAL(public, bool, bool, AlwaysReplayLocally, false)                               \
                                                                                                    \
   DOCUMENT(                                                                                        \
+      "``True`` if automation flows (launch profiles, scripted CLI, headless replay) should "      \
+      "silently dismiss replay-incompatibility modals — \"Suggest remote replay\", \"capture API " \
+      "may not behave correctly\", and similar non-fatal warnings. Fatal modals (driver "          \
+      "unsupported, file not found) are not affected.\n"                                           \
+      "\n"                                                                                         \
+      "When ``True``, dismissed warnings are still appended to the debug message log so "          \
+      "``util/automation/nonblocking.py`` (and equivalent scripts) can surface them.\n"            \
+      "\n"                                                                                         \
+      "Launch profiles can override this per-run via the ``suppress_incompat_modals`` field — "    \
+      "see ``util/automation/launch_profile.py``.\n"                                               \
+      "\n"                                                                                         \
+      "Defaults to ``False``."                                                                     \
+      ""                                                                                           \
+      ":type: bool");                                                                              \
+  CONFIG_SETTING_VAL(public, bool, bool, AutomationSuppressIncompatModals, false)                  \
+                                                                                                   \
+  DOCUMENT(                                                                                        \
       "The index of the local proxy API to use when using remote context replay. ``-1`` if the "   \
       "default proxy should be used.\n"                                                            \
       "\n"                                                                                         \

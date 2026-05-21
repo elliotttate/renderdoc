@@ -853,7 +853,8 @@ void MainWindow::LoadCapture(const QString &filename, const ReplayOptions &opts,
       // hasn't previously chosen to always replay locally without being prompted, ask if they'd
       // prefer to switch to a remote context for replaying.
       if(support == ReplaySupport::SuggestRemote && !remoteReplay &&
-         !m_Ctx.Config().AlwaysReplayLocally)
+         !m_Ctx.Config().AlwaysReplayLocally &&
+         !m_Ctx.Config().AutomationSuppressIncompatModals)
       {
         SuggestRemoteDialog dialog(driver, machineIdent, this);
 
