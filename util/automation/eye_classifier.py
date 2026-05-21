@@ -73,22 +73,45 @@ def classify_capture(capture_path: str, config=None) -> dict:
 
 
 def _infer_main_rt(controller, textures_by_id):
-    """Find the largest 2D RT used as a color output by any action."""
-    best = (0, 0)
-    seen = set()
+    """Find the most likely "scene-color" RT — i.e. the RT shape that the
+    real per-eye work targets.
+
+    Strategy: count distinct draw-action outputs by texture-shape. The
+    shape most frequently bound as RT0 in draw actions is almost always
+    the scene-color target. This avoids picking shadow atlases or virtual
+    shadow maps just because they happen to be the largest RT in the
+    capture (the original heuristic).
+    """
+    shape_counts = {}
     for action in _lib.walk_actions(controller):
-        for o in action.outputs:
-            rid = _lib.resource_id_str(o)
-            if rid is None or rid in seen:
-                continue
-            seen.add(rid)
-            tex = textures_by_id.get(rid)
+        if not (int(action.flags) & int(rd.ActionFlags.Drawcall)):
+            continue
+        outs = list(action.outputs) if action.outputs else []
+        if not outs:
+            continue
+        rid = _lib.resource_id_str(outs[0])
+        if rid is None:
+            continue
+        tex = textures_by_id.get(rid)
+        if tex is None:
+            continue
+        w, h = int(tex.width), int(tex.height)
+        # ignore obvious atlases and shadow maps — typically square > 1024
+        if w == h and w >= 1024:
+            continue
+        shape_counts[(w, h)] = shape_counts.get((w, h), 0) + 1
+    if not shape_counts:
+        # Fall back to the old "largest" heuristic
+        best = (0, 0)
+        for tex in textures_by_id.values():
             if tex is None:
                 continue
             w, h = int(tex.width), int(tex.height)
             if w * h > best[0] * best[1]:
                 best = (w, h)
-    return best
+        return best
+    # Most frequently bound scene-color shape
+    return max(shape_counts.items(), key=lambda kv: kv[1])[0]
 
 
 def _classify_one(controller, eid, action, textures_by_id, full_w, full_h, mode, swap):
@@ -126,21 +149,35 @@ def _classify_one(controller, eid, action, textures_by_id, full_w, full_h, mode,
 
     # Decide effective mode
     eff_mode = mode
+    sbs_width_hint = rt_w
     if eff_mode == "auto":
         if rt_w >= 2 * rt_h:
             eff_mode = "sbs"
+            sbs_width_hint = rt_w
         elif rt_h >= 2 * rt_w:
             eff_mode = "stacked"
         elif rt_slice is not None and rt_slice in (0, 1):
             eff_mode = "array_slice"
+        # Fallback: the per-event RT isn't SBS-shaped (could be a shadow
+        # map or post-process intermediate), but the inferred *main* RT
+        # is — classify by viewport against the main-RT half-line. Many
+        # SN2 draws target intermediates but share a viewport rect with
+        # the main-RT eye split.
+        elif vp is not None and full_w >= 2 * full_h and full_w > 0:
+            half = full_w / 2.0
+            # Only accept if the viewport's center is clearly in one half.
+            cx = vp[0] + vp[2] / 2.0
+            if cx < half * 0.85 or cx > half * 1.15:
+                eff_mode = "sbs"
+                sbs_width_hint = full_w
 
     if eff_mode == "sbs" and vp is not None:
-        half = rt_w / 2.0
+        half = sbs_width_hint / 2.0
         if vp[0] + vp[2] / 2.0 < half:
             eye = "left"
         else:
             eye = "right"
-        reason = f"sbs viewport x={vp[0]:.0f} w={vp[2]:.0f} of {rt_w}"
+        reason = f"sbs viewport x={vp[0]:.0f} w={vp[2]:.0f} of {sbs_width_hint}"
         confidence = 0.95
     elif eff_mode == "stacked" and vp is not None:
         half = rt_h / 2.0
