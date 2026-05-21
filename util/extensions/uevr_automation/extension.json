@@ -1,0 +1,9 @@
+{
+    "extension_api": 1,
+    "name": "UEVR / Nsight Automation",
+    "version": "1.0",
+    "minimum_renderdoc": "1.32",
+    "description": "Surfaces the util/automation modules as menu items under Tools > Automation. Implements the qrenderdoc UI panels from docs/UEVR_NSIGHT_AUTOMATION_ROADMAP.md §20.\n\nProvides:\n- Explain Selected Draw\n- Descriptor Table At Event\n- Resource Lineage\n- Compare With Other Eye\n- Find Final Writer For Pixel\n- Events Using This Shader / Reading / Writing This Resource\n- Export Event State To JSON\n- Copy Root Binding Summary\n- Run Replay-Time Probe\n- Run Multi-Step Experiment",
+    "author": "RenderDoc Automation",
+    "url": "https://github.com/elliotttate/renderdoc"
+}
