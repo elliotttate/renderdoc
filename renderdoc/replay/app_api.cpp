@@ -401,6 +401,11 @@ void Init_1_7_0()
   api.SetCommandAnnotation = &SetCommandAnnotation;
 }
 
+extern "C" RENDERDOC_API void RENDERDOC_CC RENDERDOC_UEVR_RefreshHooks()
+{
+  LibraryHooks::Refresh();
+}
+
 extern "C" RENDERDOC_API int RENDERDOC_CC RENDERDOC_GetAPI(RENDERDOC_Version version,
                                                            void **outAPIPointers)
 {

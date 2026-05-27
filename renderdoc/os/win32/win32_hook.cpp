@@ -980,7 +980,20 @@ void LibraryHooks::EndHookRegistration()
 
 void LibraryHooks::Refresh()
 {
-  // don't need to refresh on windows
+  if(s_HookData == NULL)
+    return;
+
+  HookAllModules();
+
+  if(s_HookData->missedOrdinals)
+  {
+#if ENABLED(VERBOSE_DEBUG_HOOK)
+    RDCDEBUG("Missed ordinals - refreshing hooks again");
+#endif
+
+    HookAllModules();
+    s_HookData->missedOrdinals = false;
+  }
 }
 
 void LibraryHooks::ReplayInitialise()
