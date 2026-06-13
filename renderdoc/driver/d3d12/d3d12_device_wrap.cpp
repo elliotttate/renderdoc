@@ -1070,6 +1070,11 @@ bool WrappedID3D12Device::Serialise_CreateDescriptorHeap(
   {
     D3D12_DESCRIPTOR_HEAP_DESC PatchedDesc = Descriptor;
     bool patched = false;
+    // Number of descriptors the application sees. Normally == Descriptor.NumDescriptors and the
+    // 16 patch descriptors live just past it (in the +16 inflated region). When the heap is already
+    // at the tier-3 hardware max (1,000,000) and can't inflate, we instead RESERVE the top 16 from
+    // within the heap by lowering the app-visible count — see the fallback below.
+    UINT unpatchedNumDescriptors = Descriptor.NumDescriptors;
 
     // inflate the heap so we can insert our own descriptors at the end
     // while patching, because DX12 has a stupid limitation to not be able
@@ -1097,8 +1102,17 @@ bool WrappedID3D12Device::Serialise_CreateDescriptorHeap(
     {
       RDCWARN(
           "RenderDoc needs extra descriptors for patching during analysis,"
-          "but heap failed to expand any further even at tier 3");
+          "but heap failed to expand any further even at tier 3 — "
+          "reserving the top 16 descriptors from within the heap instead");
+      // The heap can't grow past the tier-3 hardware max, so recreate it at the original size and
+      // carve the 16 patch descriptors out of the TOP of the heap by reducing the app-visible count.
+      // The patch region then sits at [unpatchedNumDescriptors, NumDescriptors) which is valid,
+      // instead of overflowing past the end of the heap (the previous behaviour, which crashed when
+      // analysis wrote patch descriptors at [N, N+16) into an N-sized heap). Apps that actually use
+      // the very top 16 of a ~1M heap will lose those during analysis, which is vanishingly rare.
       PatchedDesc.NumDescriptors = Descriptor.NumDescriptors;
+      if(Descriptor.NumDescriptors > 16)
+        unpatchedNumDescriptors = Descriptor.NumDescriptors - 16;
 
       hr = m_pDevice->CreateDescriptorHeap(&PatchedDesc, guid, (void **)&ret);
     }
@@ -1112,7 +1126,7 @@ bool WrappedID3D12Device::Serialise_CreateDescriptorHeap(
     else
     {
       WrappedID3D12DescriptorHeap *wrapped =
-          new WrappedID3D12DescriptorHeap(pHeap, ret, this, PatchedDesc, Descriptor.NumDescriptors);
+          new WrappedID3D12DescriptorHeap(pHeap, ret, this, PatchedDesc, unpatchedNumDescriptors);
 
       wrapped->SetOriginalGPUBase(originalGPUBase);
 
@@ -1124,7 +1138,7 @@ bool WrappedID3D12Device::Serialise_CreateDescriptorHeap(
       desc.resourceId = pHeap;
       desc.descriptorByteSize = 1;
       desc.firstDescriptorOffset = 0;
-      desc.descriptorCount = Descriptor.NumDescriptors;
+      desc.descriptorCount = unpatchedNumDescriptors;
       GetReplay()->RegisterDescriptorStore(desc);
     }
   }
