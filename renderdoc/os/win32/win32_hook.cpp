@@ -875,6 +875,28 @@ FARPROC WINAPI Hooked_GetProcAddress(HMODULE mod, const LPCSTR func)
 
   return GetProcAddress(mod, func);
 }
+
+// CyberpunkVRPort layers a small number of MinHook detours over D3D12/DXGI.  Calling the
+// operating-system GetProcAddress from those detours would select the raw runtime export and
+// bypass RenderDoc's serializer even when RenderDoc was loaded before the game.  Expose the
+// same resolution policy used by RenderDoc's patched GetProcAddress IAT so an opt-in capture
+// build can place CPVR above the RenderDoc wrapper instead of below it.
+extern "C" __declspec(dllexport) FARPROC __cdecl
+RENDERDOC_CPVR_GetHookedProcAddress(HMODULE mod, const LPCSTR func)
+{
+  return Hooked_GetProcAddress(mod, func);
+}
+
+// The CPVR module's own GetProcAddress IAT is patched by RenderDoc, so a normal lookup from
+// that module cannot recover the system entry point that Streamline calls directly.  This
+// function executes inside renderdoc.dll (which LibraryHooks intentionally excludes from its
+// own patches) and therefore returns the genuine loader result.
+extern "C" __declspec(dllexport) FARPROC __cdecl
+RENDERDOC_CPVR_GetRawProcAddress(HMODULE mod, const LPCSTR func)
+{
+  return GetProcAddress(mod, func);
+}
+
 static void InitHookData()
 {
   if(!s_HookData)

@@ -31,6 +31,13 @@
 #include "hooks/hooks.h"
 #include "strings/string_utils.h"
 
+static bool env_truthy(const wchar_t *name)
+{
+  wchar_t value[8] = {};
+  DWORD length = GetEnvironmentVariableW(name, value, ARRAY_COUNT(value));
+  return length > 0 && length < ARRAY_COUNT(value) && value[0] != L'0';
+}
+
 static BOOL add_hooks()
 {
   wchar_t curFile[512];
@@ -64,6 +71,16 @@ static BOOL add_hooks()
   }
 
   RenderDoc::Inst().Initialise();
+
+  // Cyberpunk initialises NVIDIA's ray-tracing/DLSS stack before RED4ext loads game plugins.
+  // When RenderDoc is injected at process start, its default NVAPI filter makes that early
+  // initialisation fail before the Cyberpunk VR plugin can request the normal in-app opt-in.
+  // Keep this explicitly launch-scoped so stock RenderDoc behaviour is unchanged.
+  if(env_truthy(L"CPVR_RENDERDOC_ALLOW_NVAPI"))
+  {
+    RenderDoc::Inst().EnableVendorExtensions(VendorExtensions::NvAPI);
+    RDCLOG("CPVR launch opt-in enabled NVIDIA vendor extensions before hook registration");
+  }
 
   RDCLOG("Loading into %ls", curFile);
 
